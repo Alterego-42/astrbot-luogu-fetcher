@@ -633,7 +633,7 @@ class LuoguDataFetcher:
 
     def screenshot_checkin(self) -> Optional[bytes]:
         """
-        截图打卡页面（包含忌、宜推荐等）
+        执行打卡并截图打卡页面（包含忌、宜推荐等）
 
         Returns:
             PNG 字节数据，或 None
@@ -648,7 +648,6 @@ class LuoguDataFetcher:
                 logger.warning(f'[Luogu] 重新创建页面失败: {e}')
                 return None
 
-        # 重试机制：最多尝试3次
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
@@ -657,11 +656,29 @@ class LuoguDataFetcher:
                 self.page.wait_for_load_state('domcontentloaded', timeout=15000)
                 time.sleep(1)
 
+                # ── 检查是否已打卡 ──
+                html = self.page.content()
+                already_checked = 'lg-punch-result' in html
+
+                if not already_checked:
+                    # ── 未打卡：点击打卡按钮 ──
+                    logger.info('[Luogu] 未打卡，执行打卡操作...')
+                    btn = (
+                        self.page.query_selector('a[name="punch"]') or
+                        self.page.query_selector('.am-btn-warning[title]') or
+                        self.page.query_selector('a:has-text("点击打卡")')
+                    )
+                    if btn:
+                        btn.click()
+                        time.sleep(3)  # 等待打卡结果
+                    else:
+                        logger.warning('[Luogu] 未找到打卡按钮')
+
                 # 滚动到顶部
                 self.page.evaluate('window.scrollTo(0, 0)')
                 time.sleep(0.3)
 
-                # 打卡区域选择器 - 尝试多个可能的选择器
+                # 打卡区域选择器
                 selectors = [
                     '.lg-punch',
                     '.punch-card',
@@ -676,7 +693,6 @@ class LuoguDataFetcher:
                         el = elements.first
                         box = el.bounding_box()
                         if box and box['width'] > 50 and box['height'] > 50:
-                            # 截图并扩展边距
                             img_bytes = self.page.screenshot(
                                 type='png',
                                 clip={
@@ -689,7 +705,7 @@ class LuoguDataFetcher:
                             logger.info(f'[Luogu] 打卡截图成功')
                             return img_bytes
 
-                # 如果没找到特定区域，截取整个首页顶部
+                # 兜底：截取整个首页
                 img_bytes = self.page.screenshot(type='png')
                 logger.info(f'[Luogu] 打卡截图成功（整页模式）')
                 return img_bytes
@@ -697,7 +713,6 @@ class LuoguDataFetcher:
             except Exception as e:
                 logger.warning(f'[Luogu] 打卡截图失败（第{attempt}/{max_retries}次）: {e}')
                 if attempt < max_retries:
-                    # 重试前重新创建页面
                     try:
                         self.page = self.context.new_page()
                         self.page.set_default_timeout(30000)
