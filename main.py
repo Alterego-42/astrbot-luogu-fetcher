@@ -98,6 +98,40 @@ def _get_uid_for_qq(qq_id: str) -> Optional[str]:
     return None
 
 
+import tempfile
+import uuid
+
+def _ensure_image_path(img_data: Any) -> Optional[str]:
+    """
+    确保图片数据可以被 image_result 使用。
+    如果是 bytes，保存为临时文件返回路径。
+    如果是 str，直接返回。
+    返回 None 如果数据无效。
+    """
+    if img_data is None:
+        return None
+    
+    # 如果是 bytes，保存为临时文件
+    if isinstance(img_data, bytes):
+        try:
+            # 创建临时文件
+            temp_dir = tempfile.gettempdir()
+            filename = f'luogu_temp_{uuid.uuid4().hex[:8]}.png'
+            temp_path = os.path.join(temp_dir, filename)
+            with open(temp_path, 'wb') as f:
+                f.write(img_data)
+            return temp_path
+        except Exception as e:
+            logger.warning(f'[Luogu] 保存临时图片失败: {e}')
+            return None
+    
+    # 如果是 str（文件路径或 URL），直接返回
+    if isinstance(img_data, str):
+        return img_data
+    
+    return None
+
+
 def _run_sync(cookies_file: str, qq_id: str, task_fn, **kwargs) -> Any:
     """
     在同步线程中运行 LuoguDataFetcher 任务。
@@ -198,6 +232,15 @@ def _do_login(username: str, password: str, qq_id: str) -> Dict:
             # 4. 处理验证码（最多5次 OCR 或直接点提交）
             captcha_solved = False
             for attempt in range(5):
+                # 先关闭可能存在的错误弹窗
+                try:
+                    close_btn = page.query_selector('.swal2-close') or page.query_selector('button.swal2-confirm')
+                    if close_btn and page.is_visible('.swal2-popup'):
+                        close_btn.click()
+                        time.sleep(0.5)
+                except Exception:
+                    pass
+
                 # 尝试获取验证码图片
                 captcha_img = (
                     page.query_selector('img[src*="captcha"]') or
@@ -251,10 +294,20 @@ def _do_login(username: str, password: str, qq_id: str) -> Dict:
                     if page.is_visible('text=密码错误') or page.is_visible('text=账号或密码'):
                         browser.close()
                         return {'success': False, 'message': '账号或密码错误', 'uid': None}
-                    # 验证码错误则刷新重试
-                    if captcha_img:
-                        captcha_img.click()
-                        time.sleep(0.5)
+                    # 验证码错误则点击刷新按钮（先关闭弹窗）
+                    try:
+                        if page.is_visible('.swal2-popup'):
+                            close_btn = page.query_selector('.swal2-close')
+                            if close_btn:
+                                close_btn.click()
+                                time.sleep(0.5)
+                        # 再找刷新按钮
+                        refresh_btn = page.query_selector('.captcha-img') or page.query_selector('img[src*="captcha"]')
+                        if refresh_btn:
+                            refresh_btn.click()
+                            time.sleep(0.5)
+                    except Exception as e:
+                        logger.warning(f'[Luogu] 刷新验证码失败: {e}')
 
             if not captcha_solved:
                 browser.close()
@@ -421,10 +474,9 @@ if _ASTRBOT:
                     yield event.plain_result(_fmt_checkin(result))
                     # 然后截图打卡页面
                     img_bytes = await _run_async(cfile, qq_id, _task_screenshot_checkin)
-                    if img_bytes:
-                        if isinstance(img_bytes, str):
-                            img_bytes = img_bytes.encode('utf-8')
-                        yield event.image_result(img_bytes)
+                    img_path = _ensure_image_path(img_bytes)
+                    if img_path:
+                        yield event.image_result(img_path)
                 except Exception as e:
                     logger.error(f'[Luogu] checkin error: {traceback.format_exc()}')
                     yield event.plain_result(f"❌ 打卡出错：{e}")
@@ -439,16 +491,15 @@ if _ASTRBOT:
                         return
                     # 截图主页统计
                     img_bytes = await _run_async(cfile, qq_id, _task_screenshot_profile)
-                    if img_bytes:
-                        if isinstance(img_bytes, str):
-                            img_bytes = img_bytes.encode('utf-8')
-                        yield event.image_result(img_bytes)
+                    img_path = _ensure_image_path(img_bytes)
+                    if img_path:
+                        yield event.image_result(img_path)
                     else:
                         # 兜底：使用 matplotlib 生成
                         card_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_summary_card(profile))
-                        if isinstance(card_bytes, str):
-                            card_bytes = card_bytes.encode('utf-8')
-                        yield event.image_result(card_bytes)
+                        card_path = _ensure_image_path(card_bytes)
+                        if card_path:
+                            yield event.image_result(card_path)
                 except Exception as e:
                     logger.error(f'[Luogu] info error: {traceback.format_exc()}')
                     yield event.plain_result(f"❌ 获取数据出错：{e}")
@@ -459,10 +510,9 @@ if _ASTRBOT:
                 try:
                     # 直接截图热度图
                     img_bytes = await _run_async(cfile, qq_id, _task_screenshot_heatmap)
-                    if img_bytes:
-                        if isinstance(img_bytes, str):
-                            img_bytes = img_bytes.encode('utf-8')
-                        yield event.image_result(img_bytes)
+                    img_path = _ensure_image_path(img_bytes)
+                    if img_path:
+                        yield event.image_result(img_path)
                     else:
                         yield event.plain_result("❌ 无法获取热度图，请确认账号有做题数据")
                 except Exception as e:
@@ -475,10 +525,9 @@ if _ASTRBOT:
                 try:
                     # 直接截图等级分趋势图
                     img_bytes = await _run_async(cfile, qq_id, _task_screenshot_rating)
-                    if img_bytes:
-                        if isinstance(img_bytes, str):
-                            img_bytes = img_bytes.encode('utf-8')
-                        yield event.image_result(img_bytes)
+                    img_path = _ensure_image_path(img_bytes)
+                    if img_path:
+                        yield event.image_result(img_path)
                     else:
                         yield event.plain_result("❌ 无法获取等级分趋势图，请确认账号有比赛记录")
                 except Exception as e:
@@ -495,10 +544,10 @@ if _ASTRBOT:
                     bar_data = {d: len(pids) for d, pids in by_diff.items() if pids}
                     if bar_data:
                         img_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_bar_chart(bar_data, title=f"{practice.get('total_passed', 0)} 题按难度分布", ylabel='题数', color='#1890ff'))
-                        if isinstance(img_bytes, str):
-                            img_bytes = img_bytes.encode('utf-8')
+                        img_path = _ensure_image_path(img_bytes)
                         yield event.plain_result(text)
-                        yield event.image_result(img_bytes)
+                        if img_path:
+                            yield event.image_result(img_path)
                     else:
                         yield event.plain_result(text)
                 except Exception as e:
