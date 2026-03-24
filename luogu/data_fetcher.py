@@ -310,10 +310,27 @@ class LuoguDataFetcher:
 
     def setup(self) -> 'LuoguDataFetcher':
         self._playwright = sync_playwright().start()
-        self.browser = self._playwright.chromium.launch(headless=self.headless)
-        self.context = self.browser.new_context()
+        # 添加浏览器启动参数，提高稳定性和速度
+        self.browser = self._playwright.chromium.launch(
+            headless=self.headless,
+            args=[
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--single-process',  # 减少进程开销
+            ],
+            timeout=30000
+        )
+        # 设置更短的超时时间
+        self.context = self.browser.new_context(
+            viewport={'width': 1280, 'height': 720},
+            ignore_https_errors=True,  # 忽略 HTTPS 错误
+        )
         self._load_cookies()
         self.page = self.context.new_page()
+        # 设置默认超时
+        self.page.set_default_timeout(30000)
         return self
 
     def close(self):
@@ -623,53 +640,61 @@ class LuoguDataFetcher:
         Returns:
             PNG 字节数据，或 None
         """
-        try:
-            logger.info(f'[Luogu] 开始截取打卡页面...')
-            # 减少超时时间，使用 domcontentloaded 加快加载
-            self.page.goto('https://www.luogu.com.cn/', timeout=20000)
-            self.page.wait_for_load_state('domcontentloaded', timeout=10000)
-            time.sleep(1)  # 减少等待时间
+        # 重试机制：最多尝试3次
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(f'[Luogu] 开始截取打卡页面（第{attempt}次尝试）...')
+                # 增加超时时间到30秒，减少重试卡顿
+                self.page.goto('https://www.luogu.com.cn/', timeout=30000)
+                self.page.wait_for_load_state('domcontentloaded', timeout=15000)
+                time.sleep(1)
 
-            # 滚动到顶部
-            self.page.evaluate('window.scrollTo(0, 0)')
-            time.sleep(0.3)
+                # 滚动到顶部
+                self.page.evaluate('window.scrollTo(0, 0)')
+                time.sleep(0.3)
 
-            # 打卡区域选择器 - 尝试多个可能的选择器
-            selectors = [
-                '.lg-punch',
-                '.punch-card',
-                '[class*="punch"]',
-                '.index-punch',
-                '#app .lg-punch',
-            ]
+                # 打卡区域选择器 - 尝试多个可能的选择器
+                selectors = [
+                    '.lg-punch',
+                    '.punch-card',
+                    '[class*="punch"]',
+                    '.index-punch',
+                    '#app .lg-punch',
+                ]
 
-            for selector in selectors:
-                elements = self.page.locator(selector)
-                if elements.count() > 0:
-                    el = elements.first
-                    box = el.bounding_box()
-                    if box and box['width'] > 50 and box['height'] > 50:
-                        # 截图并扩展边距
-                        img_bytes = self.page.screenshot(
-                            type='png',
-                            clip={
-                                'x': max(0, box['x'] - 10),
-                                'y': max(0, box['y'] - 10),
-                                'width': min(box['width'] + 20, 600),
-                                'height': min(box['height'] + 20, 500)
-                            }
-                        )
-                        logger.info(f'[Luogu] 打卡截图成功')
-                        return img_bytes
+                for selector in selectors:
+                    elements = self.page.locator(selector)
+                    if elements.count() > 0:
+                        el = elements.first
+                        box = el.bounding_box()
+                        if box and box['width'] > 50 and box['height'] > 50:
+                            # 截图并扩展边距
+                            img_bytes = self.page.screenshot(
+                                type='png',
+                                clip={
+                                    'x': max(0, box['x'] - 10),
+                                    'y': max(0, box['y'] - 10),
+                                    'width': min(box['width'] + 20, 600),
+                                    'height': min(box['height'] + 20, 500)
+                                }
+                            )
+                            logger.info(f'[Luogu] 打卡截图成功')
+                            return img_bytes
 
-            # 如果没找到特定区域，截取整个首页顶部
-            img_bytes = self.page.screenshot(type='png')
-            logger.info(f'[Luogu] 打卡截图成功（整页模式）')
-            return img_bytes
+                # 如果没找到特定区域，截取整个首页顶部
+                img_bytes = self.page.screenshot(type='png')
+                logger.info(f'[Luogu] 打卡截图成功（整页模式）')
+                return img_bytes
 
-        except Exception as e:
-            logger.warning(f'[Luogu] 打卡截图失败: {e}')
-            return None
+            except Exception as e:
+                logger.warning(f'[Luogu] 打卡截图失败（第{attempt}/{max_retries}次）: {e}')
+                if attempt < max_retries:
+                    time.sleep(2)  # 失败后等待2秒再重试
+                else:
+                    return None
+        
+        return None
 
     def screenshot_heatmap(self) -> Optional[bytes]:
         """

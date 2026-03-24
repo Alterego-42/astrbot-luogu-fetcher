@@ -306,10 +306,12 @@ def _do_login(username: str, password: str, qq_id: str) -> Dict:
                         if page.is_visible('.swal2-popup'):
                             close_btn = page.query_selector('.swal2-close')
                             if close_btn:
-                                close_btn.click()
-                                time.sleep(1)
+                                # 快速点击，5秒超时，避免长时间卡住
+                                close_btn.click(timeout=5000)
+                                time.sleep(0.5)
                         logger.info(f'[Luogu] 验证码识别错误，准备重试...')
                     except Exception as e:
+                        # 关闭失败也继续重试，不要阻塞
                         logger.warning(f'[Luogu] 关闭验证码弹窗失败: {e}')
 
             if not captcha_solved:
