@@ -595,23 +595,42 @@ if _ASTRBOT:
                 return
 
             if sub == 'info':
-                logger.info(f'[Luogu] 用户 {qq_id} 请求 info')
-                yield event.plain_result("📊 正在获取个人数据...")
-                try:
-                    logger.info(f'[Luogu] 开始获取个人主页数据...')
-                    profile = await _run_async(cfile, qq_id, _task_profile)
-                    if not profile:
-                        logger.warning(f'[Luogu] 用户 {qq_id} 获取数据失败')
-                        yield event.plain_result("❌ 获取数据失败，请检查账号是否有效")
-                        return
-                    logger.info(f'[Luogu] 数据获取完成，准备格式化...')
-                    # 使用文字版显示，包含咕值构成和评定比赛
-                    text = _fmt_profile(profile)
-                    logger.info(f'[Luogu] info 命令执行完成')
+                force_refresh = '-f' in args[1:]
+                logger.info(f'[Luogu] 用户 {qq_id} 请求 info (force={force_refresh})')
+
+                # 尝试读取已保存的数据
+                userdata_file = _userdata_path(qq_id)
+                cached_profile = None
+                if not force_refresh and userdata_file.exists():
+                    try:
+                        import json as _json
+                        with open(userdata_file, 'r', encoding='utf-8') as f:
+                            userdata = _json.load(f)
+                            cached_profile = userdata.get('profile')
+                            if cached_profile:
+                                logger.info(f'[Luogu] 使用已缓存的 profile 数据')
+                    except Exception:
+                        pass
+
+                if cached_profile:
+                    text = _fmt_profile(cached_profile)
                     yield event.plain_result(text)
-                except Exception as e:
-                    logger.error(f'[Luogu] info error: {traceback.format_exc()}')
-                    yield event.plain_result(f"❌ 获取数据出错：{e}")
+                else:
+                    yield event.plain_result("📊 正在获取个人数据...")
+                    try:
+                        logger.info(f'[Luogu] 开始获取个人主页数据...')
+                        profile = await _run_async(cfile, qq_id, _task_profile)
+                        if not profile:
+                            logger.warning(f'[Luogu] 用户 {qq_id} 获取数据失败')
+                            yield event.plain_result("❌ 获取数据失败，请检查账号是否有效")
+                            return
+                        logger.info(f'[Luogu] 数据获取完成，准备格式化...')
+                        text = _fmt_profile(profile)
+                        logger.info(f'[Luogu] info 命令执行完成')
+                        yield event.plain_result(text)
+                    except Exception as e:
+                        logger.error(f'[Luogu] info error: {traceback.format_exc()}')
+                        yield event.plain_result(f"❌ 获取数据出错：{e}")
                 return
 
             if sub == 'heatmap':
@@ -665,40 +684,61 @@ if _ASTRBOT:
                 return
 
             if sub == 'practice':
-                logger.info(f'[Luogu] 用户 {qq_id} 请求 practice')
-                yield event.plain_result("📚 正在获取练习数据...")
-                try:
-                    logger.info(f'[Luogu] 开始获取练习数据...')
-                    # 先获取文字信息
-                    practice = await _run_async(cfile, qq_id, _task_practice)
-                    logger.info(f'[Luogu] 练习数据获取完成，已通过 {practice.get("total_passed", 0)} 题')
-                    text = _fmt_practice(practice)
+                force_refresh = '-f' in args[1:]  # 检查是否有 -f 参数
+                logger.info(f'[Luogu] 用户 {qq_id} 请求 practice (force={force_refresh})')
+
+                # 尝试读取已保存的数据
+                userdata_file = _userdata_path(qq_id)
+                cached_practice = None
+                if not force_refresh and userdata_file.exists():
+                    try:
+                        import json as _json
+                        with open(userdata_file, 'r', encoding='utf-8') as f:
+                            userdata = _json.load(f)
+                            cached_practice = userdata.get('practice')
+                            if cached_practice:
+                                logger.info(f'[Luogu] 使用已缓存的练习数据，已通过 {cached_practice.get("total_passed", 0)} 题')
+                    except Exception:
+                        pass
+
+                if cached_practice:
+                    # 使用缓存数据
+                    text = _fmt_practice(cached_practice)
                     yield event.plain_result(text)
-                    
-                    # 然后截图难度分布
-                    logger.info(f'[Luogu] 开始截取难度分布图...')
-                    img_bytes = await _run_async(cfile, qq_id, _task_screenshot_practice)
-                    img_path = _ensure_image_path(img_bytes)
-                    if img_path:
-                        logger.info(f'[Luogu] 难度分布截图成功，准备发送...')
-                        yield event.image_result(img_path)
-                    else:
-                        logger.warning(f'[Luogu] 难度分布截图失败，尝试使用生成卡片...')
-                        # 兜底：使用难度分布卡片生成
+
+                    # 生成难度分布卡片
+                    passed_data = {d: len(pids) for d, pids in cached_practice.get('passed_by_difficulty', {}).items() if pids}
+                    if passed_data:
+                        card_bytes = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: generate_difficulty_cards(passed_data, username=cached_practice.get('name', ''))
+                        )
+                        card_path = _ensure_image_path(card_bytes)
+                        if card_path:
+                            yield event.image_result(card_path)
+                else:
+                    # 需要重新获取
+                    yield event.plain_result("📚 正在获取练习数据...")
+                    try:
+                        logger.info(f'[Luogu] 开始获取练习数据...')
+                        practice = await _run_async(cfile, qq_id, _task_practice)
+                        logger.info(f'[Luogu] 练习数据获取完成，已通过 {practice.get("total_passed", 0)} 题')
+                        text = _fmt_practice(practice)
+                        yield event.plain_result(text)
+
+                        # 生成难度分布卡片
                         passed_data = {d: len(pids) for d, pids in practice.get('passed_by_difficulty', {}).items() if pids}
                         if passed_data:
-                            logger.info(f'[Luogu] 开始生成难度分布卡片...')
                             card_bytes = await asyncio.get_event_loop().run_in_executor(
                                 None,
                                 lambda: generate_difficulty_cards(passed_data, username=practice.get('name', ''))
                             )
                             card_path = _ensure_image_path(card_bytes)
                             if card_path:
-                                logger.info(f'[Luogu] 难度分布卡片生成成功，准备发送...')
                                 yield event.image_result(card_path)
-                except Exception as e:
-                    logger.error(f'[Luogu] practice error: {traceback.format_exc()}')
-                    yield event.plain_result(f"❌ 获取练习数据出错：{e}")
+                    except Exception as e:
+                        logger.error(f'[Luogu] practice error: {traceback.format_exc()}')
+                        yield event.plain_result(f"❌ 获取练习数据出错：{e}")
                 return
 
             yield event.plain_result(HELP_TEXT)

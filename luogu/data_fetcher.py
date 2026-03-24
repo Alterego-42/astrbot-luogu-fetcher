@@ -940,15 +940,24 @@ class LuoguDataFetcher:
                     el = elements.first
                     box = el.bounding_box()
                     if box and box['width'] > 100:
-                        # 增加高度以包含所有8个难度标签（从灰色到黑色）
-                        # 截图区域：向右扩展宽度，向上下扩展高度
+                        # 确保 clip 区域不超过视口
+                        viewport = self.page.viewport_size
+                        max_x = max(box['x'] - 20, 0)
+                        max_y = max(box['y'] - 80, 0)
+                        max_w = min(box['width'] + 40, viewport['width'] - max_x if viewport else 800)
+                        max_h = min(box['height'] + 160, viewport['height'] - max_y if viewport else 600)
+
+                        # 确保宽高至少为 1
+                        max_w = max(max_w, 1)
+                        max_h = max(max_h, 1)
+
                         img_bytes = self.page.screenshot(
                             type='png',
                             clip={
-                                'x': max(0, box['x'] - 20),
-                                'y': max(0, box['y'] - 80),
-                                'width': min(box['width'] + 40, 1200),
-                                'height': min(box['height'] + 160, 800)
+                                'x': max_x,
+                                'y': max_y,
+                                'width': max_w,
+                                'height': max_h
                             }
                         )
                         logger.info(f'[Luogu] 难度分布截图成功')
