@@ -49,6 +49,7 @@ from luogu.chart_generator import (
     generate_heatmap,
     generate_elo_trend,
     generate_bar_chart,
+    generate_difficulty_cards,
 )
 
 # ── 常量 ──────────────────────────────────────────────────────
@@ -187,6 +188,10 @@ def _task_screenshot_rating(fetcher: LuoguDataFetcher) -> Optional[bytes]:
 
 def _task_screenshot_profile(fetcher: LuoguDataFetcher) -> Optional[bytes]:
     return fetcher.screenshot_profile_summary()
+
+
+def _task_screenshot_practice(fetcher: LuoguDataFetcher) -> Optional[bytes]:
+    return fetcher.screenshot_practice_difficulty()
 
 
 # ════════════════════════════════════════════════════════════════
@@ -335,7 +340,41 @@ def _do_login(username: str, password: str, qq_id: str) -> Dict:
                 _save_bindings(bindings)
                 _uid_file(qq_id).write_text(uid)
 
-            browser.close()
+            # 登录成功后，自动获取并保存所有信息
+            logger.info(f'[Luogu] 登录成功，开始获取用户数据...')
+            try:
+                # 使用新登录的 context 创建 fetcher 获取数据
+                from luogu.data_fetcher import LuoguDataFetcher
+                
+                # 创建临时 fetcher（复用同一个 context）
+                temp_fetcher = LuoguDataFetcher(cookies_file, user_id=uid, headless=True)
+                temp_fetcher._playwright = pw
+                temp_fetcher.browser = browser
+                temp_fetcher.context = context
+                temp_fetcher.page = page
+                
+                # 获取所有数据
+                profile = temp_fetcher.fetch_profile_stats()
+                practice = temp_fetcher.fetch_practice_data()
+                
+                # 保存到用户数据文件
+                user_data_file = DATA_DIR / f'userdata_{qq_id}.json'
+                user_data = {
+                    'uid': uid,
+                    'profile': profile,
+                    'practice': practice,
+                    'last_updated': time.strftime('%Y-%m-%d %H:%M:%S'),
+                }
+                user_data_file.write_text(
+                    json.dumps(user_data, ensure_ascii=False, indent=2),
+                    encoding='utf-8'
+                )
+                logger.info(f'[Luogu] 用户数据已保存到 {user_data_file}')
+            except Exception as e:
+                logger.warning(f'[Luogu] 自动获取用户数据失败: {e}')
+
+            # 不关闭浏览器，让 fetcher 继续使用
+            # browser.close()
             return {'success': True, 'message': '登录成功', 'uid': uid}
 
     except Exception as e:
@@ -370,6 +409,60 @@ def _fmt_practice(data: Dict) -> str:
             if len(pids) > 10:
                 pids_str += f' ...共{len(pids)}题'
             lines.append(f"  {diff}：{pids_str}")
+    return '\n'.join(lines)
+
+
+def _fmt_profile(profile: Dict) -> str:
+    """格式化个人主页信息为文字版"""
+    lines = [
+        f"👤 {profile.get('name', profile.get('uid', '未知用户'))}",
+        f"   UID: {profile.get('uid', 'N/A')}",
+        f"",
+        f"📊 做题统计",
+        f"   通过：{profile.get('passed', 0)} 题",
+        f"   提交：{profile.get('submitted', 0)} 次",
+        f"",
+        f"🏆 等级分",
+        f"   当前等级分：{profile.get('rating', 0)}",
+        f"   评定比赛：{profile.get('contests', 0)} 场",
+        f"   排名：#{profile.get('rank', 'N/A')}",
+        f"",
+        f"💎 咕值构成",
+    ]
+    
+    # 咕值构成详情
+    guzhi = profile.get('guzhi_detail', {})
+    if guzhi and guzhi.get('total', 0) > 0:
+        lines.append(f"   总咕值：{guzhi.get('total', 0)}")
+        # 显示各构成部分
+        scores = guzhi.get('scores', {})
+        if scores:
+            score_items = []
+            if scores.get('basic'):
+                score_items.append(f"基础信用 {scores.get('basic')}")
+            if scores.get('practice'):
+                score_items.append(f"练习情况 {scores.get('practice')}")
+            if scores.get('contest'):
+                score_items.append(f"比赛情况 {scores.get('contest')}")
+            if scores.get('social'):
+                score_items.append(f"社区贡献 {scores.get('social')}")
+            if scores.get('prize'):
+                score_items.append(f"获得成就 {scores.get('prize')}")
+            if score_items:
+                lines.append("   " + " | ".join(score_items))
+    else:
+        lines.append(f"   总咕值：{profile.get('csr', 0)}")
+    
+    # 评定比赛列表
+    contest_names = profile.get('contest_names', [])
+    if contest_names:
+        lines.append(f"")
+        lines.append(f"📋 评定比赛")
+        for name in contest_names[:10]:  # 最多显示10场
+            lines.append(f"   • {name}")
+        if len(contest_names) > 10:
+            lines.append(f"   ... 等共 {len(contest_names)} 场")
+    
     return '\n'.join(lines)
 
 
@@ -455,7 +548,7 @@ if _ASTRBOT:
                 result = await loop.run_in_executor(None, lambda: _do_login(username, password, qq_id))
                 if result['success']:
                     uid = result.get('uid', '未知')
-                    yield event.plain_result(f"✅ 绑定成功！洛谷 UID：{uid}")
+                    yield event.plain_result(f"✅ 绑定成功！洛谷 UID：{uid}\n正在获取并保存您的所有数据，请稍候...")
                 else:
                     yield event.plain_result(f"❌ 绑定失败：{result['message']}")
                 return
@@ -489,17 +582,9 @@ if _ASTRBOT:
                     if not profile:
                         yield event.plain_result("❌ 获取数据失败，请检查账号是否有效")
                         return
-                    # 截图主页统计
-                    img_bytes = await _run_async(cfile, qq_id, _task_screenshot_profile)
-                    img_path = _ensure_image_path(img_bytes)
-                    if img_path:
-                        yield event.image_result(img_path)
-                    else:
-                        # 兜底：使用 matplotlib 生成
-                        card_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_summary_card(profile))
-                        card_path = _ensure_image_path(card_bytes)
-                        if card_path:
-                            yield event.image_result(card_path)
+                    # 使用文字版显示，包含咕值构成和评定比赛
+                    text = _fmt_profile(profile)
+                    yield event.plain_result(text)
                 except Exception as e:
                     logger.error(f'[Luogu] info error: {traceback.format_exc()}')
                     yield event.plain_result(f"❌ 获取数据出错：{e}")
@@ -521,15 +606,26 @@ if _ASTRBOT:
                 return
 
             if sub == 'elo':
-                yield event.plain_result("正在截取等级分趋势图...")
+                yield event.plain_result("正在生成等级分趋势图...")
                 try:
-                    # 直接截图等级分趋势图
-                    img_bytes = await _run_async(cfile, qq_id, _task_screenshot_rating)
-                    img_path = _ensure_image_path(img_bytes)
-                    if img_path:
-                        yield event.image_result(img_path)
+                    # 获取等级分数据
+                    profile = await _run_async(cfile, qq_id, _task_profile)
+                    elo_history = profile.get('elo_history', [])
+                    
+                    if elo_history:
+                        # 使用生成方案
+                        username = profile.get('name', '')
+                        img_bytes = await asyncio.get_event_loop().run_in_executor(
+                            None, 
+                            lambda: generate_elo_trend(elo_history, username=username)
+                        )
+                        img_path = _ensure_image_path(img_bytes)
+                        if img_path:
+                            yield event.image_result(img_path)
+                        else:
+                            yield event.plain_result("❌ 生成趋势图失败")
                     else:
-                        yield event.plain_result("❌ 无法获取等级分趋势图，请确认账号有比赛记录")
+                        yield event.plain_result("❌ 暂无等级分数据，请确认账号有参加比赛记录")
                 except Exception as e:
                     logger.error(f'[Luogu] elo error: {traceback.format_exc()}')
                     yield event.plain_result(f"❌ 生成趋势图出错：{e}")
@@ -538,18 +634,27 @@ if _ASTRBOT:
             if sub == 'practice':
                 yield event.plain_result("正在获取练习数据...")
                 try:
+                    # 先获取文字信息
                     practice = await _run_async(cfile, qq_id, _task_practice)
                     text = _fmt_practice(practice)
-                    by_diff = practice.get('passed_by_difficulty', {})
-                    bar_data = {d: len(pids) for d, pids in by_diff.items() if pids}
-                    if bar_data:
-                        img_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_bar_chart(bar_data, title=f"{practice.get('total_passed', 0)} 题按难度分布", ylabel='题数', color='#1890ff'))
-                        img_path = _ensure_image_path(img_bytes)
-                        yield event.plain_result(text)
-                        if img_path:
-                            yield event.image_result(img_path)
+                    yield event.plain_result(text)
+                    
+                    # 然后截图难度分布
+                    img_bytes = await _run_async(cfile, qq_id, _task_screenshot_practice)
+                    img_path = _ensure_image_path(img_bytes)
+                    if img_path:
+                        yield event.image_result(img_path)
                     else:
-                        yield event.plain_result(text)
+                        # 兜底：使用难度分布卡片生成
+                        passed_data = {d: len(pids) for d, pids in practice.get('passed_by_difficulty', {}).items() if pids}
+                        if passed_data:
+                            card_bytes = await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: generate_difficulty_cards(passed_data, username=practice.get('name', ''))
+                            )
+                            card_path = _ensure_image_path(card_bytes)
+                            if card_path:
+                                yield event.image_result(card_path)
                 except Exception as e:
                     logger.error(f'[Luogu] practice error: {traceback.format_exc()}')
                     yield event.plain_result(f"❌ 获取练习数据出错：{e}")

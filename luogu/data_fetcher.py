@@ -420,9 +420,26 @@ class LuoguDataFetcher:
             'fortune': str,     # 今日运势文字
           }
         """
-        self.page.goto('https://www.luogu.com.cn/', timeout=15000)
-        self.page.wait_for_load_state('networkidle')
-        time.sleep(2)
+        # 增加超时和重试
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                self.page.goto('https://www.luogu.com.cn/', timeout=30000)
+                self.page.wait_for_load_state('networkidle', timeout=15000)
+                time.sleep(2)
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                else:
+                    return {
+                        'success': False,
+                        'message': f'页面加载超时: {e}',
+                        'already_checked': False,
+                        'streak': 0,
+                        'fortune': '',
+                    }
 
         html = self.page.content()
 
@@ -599,8 +616,9 @@ class LuoguDataFetcher:
             PNG 字节数据，或 None
         """
         try:
-            self.page.goto('https://www.luogu.com.cn/', timeout=15000)
-            self.page.wait_for_load_state('networkidle')
+            # 增加超时时间
+            self.page.goto('https://www.luogu.com.cn/', timeout=30000)
+            self.page.wait_for_load_state('networkidle', timeout=15000)
             time.sleep(2)
 
             # 打卡区域选择器 - 尝试多个可能的选择器
@@ -652,7 +670,7 @@ class LuoguDataFetcher:
             return None
 
         try:
-            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=15000)
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=20000)
             self.page.wait_for_load_state('networkidle')
             time.sleep(2)
 
@@ -661,12 +679,13 @@ class LuoguDataFetcher:
             if heatmap.count() > 0:
                 box = heatmap.bounding_box()
                 if box and box['width'] > 50:
+                    # 左右再多一个汉字的长度（约14px），上下增加更多边距
                     img_bytes = self.page.screenshot(
                         type='png',
                         clip={
-                            'x': max(0, box['x'] - 10),
+                            'x': max(0, box['x'] - 24),  # 约2个汉字
                             'y': max(0, box['y'] - 50),
-                            'width': min(box['width'] + 20, 950),
+                            'width': min(box['width'] + 48, 1000),  # 左右各增加约2个汉字
                             'height': min(box['height'] + 60, 320)
                         }
                     )
@@ -683,14 +702,14 @@ class LuoguDataFetcher:
         截图等级分趋势图（canvas 元素）
 
         Returns:
-            PNG 字节数据，或 None
+            PNG 字节数据，或 None（现在改用生成方案，此方法保留备用）
         """
         uid = self._get_uid()
         if not uid:
             return None
 
         try:
-            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=15000)
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=20000)
             self.page.wait_for_load_state('networkidle')
             time.sleep(2)
 
@@ -702,9 +721,9 @@ class LuoguDataFetcher:
                     img_bytes = self.page.screenshot(
                         type='png',
                         clip={
-                            'x': max(0, box['x'] - 10),
+                            'x': max(0, box['x'] - 24),
                             'y': max(0, box['y'] - 50),
-                            'width': min(box['width'] + 20, 950),
+                            'width': min(box['width'] + 48, 1000),
                             'height': min(box['height'] + 60, 350)
                         }
                     )
@@ -728,7 +747,7 @@ class LuoguDataFetcher:
             return None
 
         try:
-            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=15000)
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=20000)
             self.page.wait_for_load_state('networkidle')
             time.sleep(2)
 
@@ -748,9 +767,10 @@ class LuoguDataFetcher:
                     first = elements.first.bounding_box()
                     last = elements.last.bounding_box()
                     if first and last:
-                        x = min(first['x'], last['x']) - 10
+                        # 左右增加一个汉字的宽度（约14px）
+                        x = min(first['x'], last['x']) - 24
                         y = min(first['y'], last['y']) - 50
-                        w = max(first['x'] + first['width'], last['x'] + last['width']) - min(first['x'], last['x']) + 20
+                        w = max(first['x'] + first['width'], last['x'] + last['width']) - min(first['x'], last['x']) + 48
                         h = max(first['y'] + first['height'], last['y'] + last['height']) - min(first['y'], last['y']) + 60
 
                         img_bytes = self.page.screenshot(
@@ -758,7 +778,7 @@ class LuoguDataFetcher:
                             clip={
                                 'x': max(0, x),
                                 'y': max(0, y),
-                                'width': min(w, 400),
+                                'width': min(w, 450),
                                 'height': min(h, 300)
                             }
                         )
@@ -770,6 +790,60 @@ class LuoguDataFetcher:
 
         except Exception as e:
             print(f"主页统计截图失败: {e}")
+            return None
+
+    def screenshot_practice_difficulty(self) -> Optional[bytes]:
+        """
+        截图练习页面的难度分布区域
+
+        Returns:
+            PNG 字节数据，或 None
+        """
+        uid = self._get_uid()
+        if not uid:
+            return None
+
+        try:
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}/practice', timeout=20000)
+            self.page.wait_for_load_state('networkidle')
+            time.sleep(2)
+
+            # 尝试找到难度分布区域
+            selectors = [
+                '[class*="difficulty"]',
+                '.passed-list',
+                '.problem-list',
+                '#app [class*="card"]',
+            ]
+
+            for selector in selectors:
+                elements = self.page.locator(selector)
+                if elements.count() > 0:
+                    # 尝试找到包含难度分布的区域
+                    for i in range(min(elements.count(), 10)):
+                        el = elements.nth(i)
+                        box = el.bounding_box()
+                        if box and box['width'] > 200 and box['height'] > 100:
+                            # 截图并扩展边距
+                            img_bytes = self.page.screenshot(
+                                type='png',
+                                clip={
+                                    'x': max(0, box['x'] - 15),
+                                    'y': max(0, box['y'] - 50),
+                                    'width': min(box['width'] + 30, 900),
+                                    'height': min(box['height'] + 70, 600)
+                                }
+                            )
+                            return img_bytes
+
+            # 兜底：截取整个练习页面
+            self.page.evaluate('window.scrollTo(0, 0)')
+            time.sleep(0.5)
+            img_bytes = self.page.screenshot(type='png', full_page=False)
+            return img_bytes
+
+        except Exception as e:
+            print(f"难度分布截图失败: {e}")
             return None
 
 
