@@ -300,20 +300,17 @@ def _do_login(username: str, password: str, qq_id: str) -> Dict:
                     if page.is_visible('text=密码错误') or page.is_visible('text=账号或密码'):
                         browser.close()
                         return {'success': False, 'message': '账号或密码错误', 'uid': None}
-                    # 验证码错误则点击刷新按钮（先关闭弹窗）
+                    # 验证码错误：关闭弹窗后直接继续循环重试
+                    # 页面通常会自动刷新验证码，无需手动点击刷新
                     try:
                         if page.is_visible('.swal2-popup'):
                             close_btn = page.query_selector('.swal2-close')
                             if close_btn:
                                 close_btn.click()
-                                time.sleep(0.5)
-                        # 再找刷新按钮
-                        refresh_btn = page.query_selector('.captcha-img') or page.query_selector('img[src*="captcha"]')
-                        if refresh_btn:
-                            refresh_btn.click()
-                            time.sleep(0.5)
+                                time.sleep(1)
+                        logger.info(f'[Luogu] 验证码识别错误，准备重试...')
                     except Exception as e:
-                        logger.warning(f'[Luogu] 刷新验证码失败: {e}')
+                        logger.warning(f'[Luogu] 关闭验证码弹窗失败: {e}')
 
             if not captcha_solved:
                 browser.close()
