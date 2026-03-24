@@ -366,196 +366,110 @@ if _ASTRBOT:
         @filter.command("luogu")
         async def cmd_luogu(self, event: AstrMessageEvent):
             args = event.message_str.strip().split()
-            # args[0] == 'luogu', args[1] == subcommand
             sub = args[1].lower() if len(args) > 1 else 'help'
+            qq_id = str(event.get_sender_id())
+
+            if sub == 'help':
+                yield event.plain_result(HELP_TEXT)
+                return
 
             if sub == 'bind':
-                await self._handle_bind(event, args)
-            elif sub == 'checkin':
-                await self._handle_checkin(event)
-            elif sub == 'info':
-                await self._handle_info(event)
-            elif sub == 'heatmap':
-                await self._handle_heatmap(event)
-            elif sub == 'elo':
-                await self._handle_elo(event)
-            elif sub == 'practice':
-                await self._handle_practice(event)
-            else:
-                yield event.plain_result(HELP_TEXT)
-
-        # ── 绑定 ──────────────────────────────────────────────
-
-        async def _handle_bind(self, event: AstrMessageEvent, args):
-            if len(args) < 4:
-                yield event.plain_result(
-                    "用法：/luogu bind <手机号> <密码>\n请注意在私聊中使用以保护密码安全")
-                return
-
-            qq_id    = str(event.get_sender_id())
-            username = args[2]
-            password = args[3]
-
-            yield event.plain_result("正在登录洛谷，请稍候（约10~30秒）...")
-
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None, lambda: _do_login(username, password, qq_id)
-            )
-
-            if result['success']:
-                uid = result.get('uid', '未知')
-                yield event.plain_result(f"✅ 绑定成功！洛谷 UID：{uid}")
-            else:
-                yield event.plain_result(f"❌ 绑定失败：{result['message']}")
-
-        # ── 打卡 ──────────────────────────────────────────────
-
-        async def _handle_checkin(self, event: AstrMessageEvent):
-            qq_id = str(event.get_sender_id())
-            cfile = str(_cookies_path(qq_id))
-
-            if not Path(cfile).exists():
-                yield event.plain_result("请先用 /luogu bind 绑定账号")
-                return
-
-            yield event.plain_result("正在打卡...")
-
-            try:
-                result = await _run_async(cfile, qq_id, _task_checkin)
-                yield event.plain_result(_fmt_checkin(result))
-            except Exception as e:
-                logger.error(f'[Luogu] checkin error: {traceback.format_exc()}')
-                yield event.plain_result(f"❌ 打卡出错：{e}")
-
-        # ── 个人统计卡片 ───────────────────────────────────────
-
-        async def _handle_info(self, event: AstrMessageEvent):
-            qq_id = str(event.get_sender_id())
-            cfile = str(_cookies_path(qq_id))
-
-            if not Path(cfile).exists():
-                yield event.plain_result("请先用 /luogu bind 绑定账号")
-                return
-
-            yield event.plain_result("正在获取数据...")
-
-            try:
-                profile = await _run_async(cfile, qq_id, _task_profile)
-                if not profile:
-                    yield event.plain_result("❌ 获取数据失败，请检查账号是否有效")
+                if len(args) < 4:
+                    yield event.plain_result("用法：/luogu bind <手机号> <密码>\n请注意在私聊中使用以保护密码安全")
                     return
-
-                # 生成统计卡片
-                img_bytes = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: generate_summary_card(profile)
-                )
-                yield event.image_result(img_bytes)
-
-            except Exception as e:
-                logger.error(f'[Luogu] info error: {traceback.format_exc()}')
-                yield event.plain_result(f"❌ 获取数据出错：{e}")
-
-        # ── 热度图 ────────────────────────────────────────────
-
-        async def _handle_heatmap(self, event: AstrMessageEvent):
-            qq_id = str(event.get_sender_id())
-            cfile = str(_cookies_path(qq_id))
-
-            if not Path(cfile).exists():
-                yield event.plain_result("请先用 /luogu bind 绑定账号")
-                return
-
-            yield event.plain_result("正在生成热度图...")
-
-            try:
-                profile = await _run_async(cfile, qq_id, _task_profile)
-                daily = profile.get('daily_counts', {})
-                username = profile.get('name', '')
-
-                if not daily:
-                    yield event.plain_result("暂无做题热度数据")
-                    return
-
-                img_bytes = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: generate_heatmap(daily, username=username)
-                )
-                yield event.image_result(img_bytes)
-
-            except Exception as e:
-                logger.error(f'[Luogu] heatmap error: {traceback.format_exc()}')
-                yield event.plain_result(f"❌ 生成热度图出错：{e}")
-
-        # ── 等级分趋势 ─────────────────────────────────────────
-
-        async def _handle_elo(self, event: AstrMessageEvent):
-            qq_id = str(event.get_sender_id())
-            cfile = str(_cookies_path(qq_id))
-
-            if not Path(cfile).exists():
-                yield event.plain_result("请先用 /luogu bind 绑定账号")
-                return
-
-            yield event.plain_result("正在生成等级分趋势图...")
-
-            try:
-                profile = await _run_async(cfile, qq_id, _task_profile)
-                elo_history = profile.get('elo_history', [])
-                username = profile.get('name', '')
-
-                if not elo_history:
-                    yield event.plain_result("暂无比赛等级分数据")
-                    return
-
-                img_bytes = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: generate_elo_trend(elo_history, username=username)
-                )
-                yield event.image_result(img_bytes)
-
-            except Exception as e:
-                logger.error(f'[Luogu] elo error: {traceback.format_exc()}')
-                yield event.plain_result(f"❌ 生成趋势图出错：{e}")
-
-        # ── 练习情况 ──────────────────────────────────────────
-
-        async def _handle_practice(self, event: AstrMessageEvent):
-            qq_id = str(event.get_sender_id())
-            cfile = str(_cookies_path(qq_id))
-
-            if not Path(cfile).exists():
-                yield event.plain_result("请先用 /luogu bind 绑定账号")
-                return
-
-            yield event.plain_result("正在获取练习数据...")
-
-            try:
-                practice = await _run_async(cfile, qq_id, _task_practice)
-
-                # 文字摘要
-                text = _fmt_practice(practice)
-
-                # 柱状图
-                by_diff = practice.get('passed_by_difficulty', {})
-                bar_data = {d: len(pids) for d, pids in by_diff.items() if pids}
-
-                if bar_data:
-                    img_bytes = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: generate_bar_chart(
-                            bar_data,
-                            title=f"{practice.get('total_passed', 0)} 题按难度分布",
-                            ylabel='题数',
-                            color='#1890ff',
-                        )
-                    )
-                    yield event.plain_result(text)
-                    yield event.image_result(img_bytes)
+                username = args[2]
+                password = args[3]
+                yield event.plain_result("正在登录洛谷，请稍候（约10~30秒）...")
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, lambda: _do_login(username, password, qq_id))
+                if result['success']:
+                    uid = result.get('uid', '未知')
+                    yield event.plain_result(f"✅ 绑定成功！洛谷 UID：{uid}")
                 else:
-                    yield event.plain_result(text)
+                    yield event.plain_result(f"❌ 绑定失败：{result['message']}")
+                return
 
-            except Exception as e:
-                logger.error(f'[Luogu] practice error: {traceback.format_exc()}')
-                yield event.plain_result(f"❌ 获取练习数据出错：{e}")
+            # 以下指令需要先绑定
+            cfile = str(_cookies_path(qq_id))
+            if not Path(cfile).exists():
+                yield event.plain_result("请先用 /luogu bind 绑定账号")
+                return
+
+            if sub == 'checkin':
+                yield event.plain_result("正在打卡...")
+                try:
+                    result = await _run_async(cfile, qq_id, _task_checkin)
+                    yield event.plain_result(_fmt_checkin(result))
+                except Exception as e:
+                    logger.error(f'[Luogu] checkin error: {traceback.format_exc()}')
+                    yield event.plain_result(f"❌ 打卡出错：{e}")
+                return
+
+            if sub == 'info':
+                yield event.plain_result("正在获取数据...")
+                try:
+                    profile = await _run_async(cfile, qq_id, _task_profile)
+                    if not profile:
+                        yield event.plain_result("❌ 获取数据失败，请检查账号是否有效")
+                        return
+                    img_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_summary_card(profile))
+                    yield event.image_result(img_bytes)
+                except Exception as e:
+                    logger.error(f'[Luogu] info error: {traceback.format_exc()}')
+                    yield event.plain_result(f"❌ 获取数据出错：{e}")
+                return
+
+            if sub == 'heatmap':
+                yield event.plain_result("正在生成热度图...")
+                try:
+                    profile = await _run_async(cfile, qq_id, _task_profile)
+                    daily = profile.get('daily_counts', {})
+                    username = profile.get('name', '')
+                    if not daily:
+                        yield event.plain_result("暂无做题热度数据")
+                        return
+                    img_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_heatmap(daily, username=username))
+                    yield event.image_result(img_bytes)
+                except Exception as e:
+                    logger.error(f'[Luogu] heatmap error: {traceback.format_exc()}')
+                    yield event.plain_result(f"❌ 生成热度图出错：{e}")
+                return
+
+            if sub == 'elo':
+                yield event.plain_result("正在生成等级分趋势图...")
+                try:
+                    profile = await _run_async(cfile, qq_id, _task_profile)
+                    elo_history = profile.get('elo_history', [])
+                    username = profile.get('name', '')
+                    if not elo_history:
+                        yield event.plain_result("暂无比赛等级分数据")
+                        return
+                    img_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_elo_trend(elo_history, username=username))
+                    yield event.image_result(img_bytes)
+                except Exception as e:
+                    logger.error(f'[Luogu] elo error: {traceback.format_exc()}')
+                    yield event.plain_result(f"❌ 生成趋势图出错：{e}")
+                return
+
+            if sub == 'practice':
+                yield event.plain_result("正在获取练习数据...")
+                try:
+                    practice = await _run_async(cfile, qq_id, _task_practice)
+                    text = _fmt_practice(practice)
+                    by_diff = practice.get('passed_by_difficulty', {})
+                    bar_data = {d: len(pids) for d, pids in by_diff.items() if pids}
+                    if bar_data:
+                        img_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_bar_chart(bar_data, title=f"{practice.get('total_passed', 0)} 题按难度分布", ylabel='题数', color='#1890ff'))
+                        yield event.plain_result(text)
+                        yield event.image_result(img_bytes)
+                    else:
+                        yield event.plain_result(text)
+                except Exception as e:
+                    logger.error(f'[Luogu] practice error: {traceback.format_exc()}')
+                    yield event.plain_result(f"❌ 获取练习数据出错：{e}")
+                return
+
+            yield event.plain_result(HELP_TEXT)
 
 
 # ════════════════════════════════════════════════════════════════
