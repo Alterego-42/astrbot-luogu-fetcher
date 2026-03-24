@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# 洛谷 Cookie（包含敏感登录信息）
+cookies/*.json
+cookies/*.txt
+!cookies/.gitkeep
+
+# 用户数据（绑定关系等）
+user_data/
+
+# 生成的截图
+screenshots/
+
+# 测试数据
+*.log
+test_output.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
