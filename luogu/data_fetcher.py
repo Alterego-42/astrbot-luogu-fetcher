@@ -310,7 +310,7 @@ class LuoguDataFetcher:
 
     def setup(self) -> 'LuoguDataFetcher':
         self._playwright = sync_playwright().start()
-        # 添加浏览器启动参数，提高稳定性和速度
+        # 添加浏览器启动参数（Windows 兼容）
         self.browser = self._playwright.chromium.launch(
             headless=self.headless,
             args=[
@@ -318,14 +318,12 @@ class LuoguDataFetcher:
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
-                '--single-process',  # 减少进程开销
-            ],
-            timeout=30000
+            ]
         )
-        # 设置更短的超时时间
+        # 设置浏览器上下文
         self.context = self.browser.new_context(
             viewport={'width': 1280, 'height': 720},
-            ignore_https_errors=True,  # 忽略 HTTPS 错误
+            ignore_https_errors=True,
         )
         self._load_cookies()
         self.page = self.context.new_page()
@@ -640,12 +638,21 @@ class LuoguDataFetcher:
         Returns:
             PNG 字节数据，或 None
         """
+        # 检查页面是否可用
+        if not self.page or self.page.is_closed():
+            logger.warning('[Luogu] 页面不可用，尝试重新创建')
+            try:
+                self.page = self.context.new_page()
+                self.page.set_default_timeout(30000)
+            except Exception as e:
+                logger.warning(f'[Luogu] 重新创建页面失败: {e}')
+                return None
+
         # 重试机制：最多尝试3次
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
                 logger.info(f'[Luogu] 开始截取打卡页面（第{attempt}次尝试）...')
-                # 增加超时时间到30秒，减少重试卡顿
                 self.page.goto('https://www.luogu.com.cn/', timeout=30000)
                 self.page.wait_for_load_state('domcontentloaded', timeout=15000)
                 time.sleep(1)
@@ -690,7 +697,13 @@ class LuoguDataFetcher:
             except Exception as e:
                 logger.warning(f'[Luogu] 打卡截图失败（第{attempt}/{max_retries}次）: {e}')
                 if attempt < max_retries:
-                    time.sleep(2)  # 失败后等待2秒再重试
+                    # 重试前重新创建页面
+                    try:
+                        self.page = self.context.new_page()
+                        self.page.set_default_timeout(30000)
+                    except Exception:
+                        pass
+                    time.sleep(2)
                 else:
                     return None
         
@@ -707,24 +720,32 @@ class LuoguDataFetcher:
         if not uid:
             return None
 
+        # 检查页面是否可用
+        if not self.page or self.page.is_closed():
+            try:
+                self.page = self.context.new_page()
+                self.page.set_default_timeout(30000)
+            except Exception as e:
+                logger.warning(f'[Luogu] 重新创建页面失败: {e}')
+                return None
+
         try:
             logger.info(f'[Luogu] 开始截取热度图...')
-            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=15000)
-            self.page.wait_for_load_state('domcontentloaded', timeout=10000)
-            time.sleep(1)  # 减少等待时间
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=20000)
+            self.page.wait_for_load_state('domcontentloaded', timeout=15000)
+            time.sleep(1)
 
             # 热度图选择器
             heatmap = self.page.locator('.heat-map')
             if heatmap.count() > 0:
                 box = heatmap.bounding_box()
                 if box and box['width'] > 50:
-                    # 左右再多一个汉字的长度（约14px），上下增加更多边距
                     img_bytes = self.page.screenshot(
                         type='png',
                         clip={
-                            'x': max(0, box['x'] - 24),  # 约2个汉字
+                            'x': max(0, box['x'] - 24),
                             'y': max(0, box['y'] - 50),
-                            'width': min(box['width'] + 48, 1000),  # 左右各增加约2个汉字
+                            'width': min(box['width'] + 48, 1000),
                             'height': min(box['height'] + 60, 320)
                         }
                     )
@@ -749,10 +770,19 @@ class LuoguDataFetcher:
         if not uid:
             return None
 
+        # 检查页面是否可用
+        if not self.page or self.page.is_closed():
+            try:
+                self.page = self.context.new_page()
+                self.page.set_default_timeout(30000)
+            except Exception as e:
+                logger.warning(f'[Luogu] 重新创建页面失败: {e}')
+                return None
+
         try:
             logger.info(f'[Luogu] 开始截取等级分趋势图...')
-            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=15000)
-            self.page.wait_for_load_state('domcontentloaded', timeout=10000)
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=20000)
+            self.page.wait_for_load_state('domcontentloaded', timeout=15000)
             time.sleep(1)
 
             # canvas 元素（等级分趋势图）
@@ -790,10 +820,19 @@ class LuoguDataFetcher:
         if not uid:
             return None
 
+        # 检查页面是否可用
+        if not self.page or self.page.is_closed():
+            try:
+                self.page = self.context.new_page()
+                self.page.set_default_timeout(30000)
+            except Exception as e:
+                logger.warning(f'[Luogu] 重新创建页面失败: {e}')
+                return None
+
         try:
             logger.info(f'[Luogu] 开始截取主页统计...')
-            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=15000)
-            self.page.wait_for_load_state('domcontentloaded', timeout=10000)
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=20000)
+            self.page.wait_for_load_state('domcontentloaded', timeout=15000)
             time.sleep(1)
 
             # 统计区域 - 通常在主页左侧或顶部
@@ -812,7 +851,6 @@ class LuoguDataFetcher:
                     first = elements.first.bounding_box()
                     last = elements.last.bounding_box()
                     if first and last:
-                        # 左右增加一个汉字的宽度（约14px）
                         x = min(first['x'], last['x']) - 24
                         y = min(first['y'], last['y']) - 50
                         w = max(first['x'] + first['width'], last['x'] + last['width']) - min(first['x'], last['x']) + 48
@@ -852,11 +890,20 @@ class LuoguDataFetcher:
         if not uid:
             return None
 
+        # 检查页面是否可用
+        if not self.page or self.page.is_closed():
+            try:
+                self.page = self.context.new_page()
+                self.page.set_default_timeout(30000)
+            except Exception as e:
+                logger.warning(f'[Luogu] 重新创建页面失败: {e}')
+                return None
+
         try:
             logger.info(f'[Luogu] 开始截取难度分布图...')
-            self.page.goto(f'https://www.luogu.com.cn/user/{uid}/practice', timeout=15000)
-            self.page.wait_for_load_state('domcontentloaded', timeout=10000)
-            time.sleep(1)  # 减少等待时间
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}/practice', timeout=20000)
+            self.page.wait_for_load_state('domcontentloaded', timeout=15000)
+            time.sleep(1)
 
             # 滚动到难度统计区域（通常在页面顶部）
             self.page.evaluate('window.scrollTo(0, 0)')
@@ -884,9 +931,9 @@ class LuoguDataFetcher:
                             type='png',
                             clip={
                                 'x': max(0, box['x'] - 20),
-                                'y': max(0, box['y'] - 80),  # 增加上边距
+                                'y': max(0, box['y'] - 80),
                                 'width': min(box['width'] + 40, 1200),
-                                'height': min(box['height'] + 160, 800)  # 大幅增加高度确保包含所有难度
+                                'height': min(box['height'] + 160, 800)
                             }
                         )
                         logger.info(f'[Luogu] 难度分布截图成功')
