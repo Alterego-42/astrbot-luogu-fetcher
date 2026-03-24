@@ -34,6 +34,7 @@ try:
     from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
     from astrbot.api.star import Context, Star, register
     from astrbot.api import logger
+    from astrbot.api.message_components import Face, Plain
     _ASTRBOT = True
 except ImportError:
     _ASTRBOT = False
@@ -354,8 +355,13 @@ def _do_login(username: str, password: str, qq_id: str) -> Dict:
                 temp_fetcher.page = page
                 
                 # 获取所有数据
+                logger.info(f'[Luogu] 正在获取个人主页数据...')
                 profile = temp_fetcher.fetch_profile_stats()
+                logger.info(f'[Luogu] 个人主页数据获取完成: {profile.get("name", "未知用户")}')
+                
+                logger.info(f'[Luogu] 正在获取练习数据...')
                 practice = temp_fetcher.fetch_practice_data()
+                logger.info(f'[Luogu] 练习数据获取完成: 已通过{practice.get("total_passed", 0)}题')
                 
                 # 保存到用户数据文件
                 user_data_file = DATA_DIR / f'userdata_{qq_id}.json'
@@ -369,9 +375,13 @@ def _do_login(username: str, password: str, qq_id: str) -> Dict:
                     json.dumps(user_data, ensure_ascii=False, indent=2),
                     encoding='utf-8'
                 )
-                logger.info(f'[Luogu] 用户数据已保存到 {user_data_file}')
+                logger.info(f'[Luogu] ✅ 用户数据已保存到 {user_data_file}')
+                
+                # 返回 OK emoji 标记获取成功
+                return {'success': True, 'message': '登录成功', 'uid': uid, 'data_saved': True}
             except Exception as e:
                 logger.warning(f'[Luogu] 自动获取用户数据失败: {e}')
+                return {'success': True, 'message': '登录成功(部分数据获取失败)', 'uid': uid, 'data_saved': False}
 
             # 不关闭浏览器，让 fetcher 继续使用
             # browser.close()
@@ -543,14 +553,21 @@ if _ASTRBOT:
                     return
                 username = args[2]
                 password = args[3]
-                yield event.plain_result("正在登录洛谷，请稍候（约10~30秒）...")
+                logger.info(f'[Luogu] 用户 {qq_id} 开始登录流程')
+                yield event.plain_result("🔐 正在登录洛谷，请稍候（约10~30秒）...")
                 loop = asyncio.get_event_loop()
                 result = await loop.run_in_executor(None, lambda: _do_login(username, password, qq_id))
                 if result['success']:
                     uid = result.get('uid', '未知')
-                    yield event.plain_result(f"✅ 绑定成功！洛谷 UID：{uid}\n正在获取并保存您的所有数据，请稍候...")
+                    logger.info(f'[Luogu] 用户 {qq_id} 登录成功，UID: {uid}，数据已保存')
+                    # 根据数据保存状态发送不同的成功消息 + QQ 表情
+                    if result.get('data_saved'):
+                        yield event.chain_result([Face(id=124), Plain(f" 绑定成功！洛谷 UID：{uid}")])
+                    else:
+                        yield event.chain_result([Face(id=123), Plain(f" 绑定成功！洛谷 UID：{uid}，部分数据获取失败")])
                 else:
-                    yield event.plain_result(f"❌ 绑定失败：{result['message']}")
+                    logger.warning(f'[Luogu] 用户 {qq_id} 登录失败: {result["message"]}')
+                    yield event.chain_result([Face(id=100), Plain(f" 绑定失败：{result['message']}")])
                 return
 
             # 以下指令需要先绑定
@@ -560,30 +577,38 @@ if _ASTRBOT:
                 return
 
             if sub == 'checkin':
-                yield event.plain_result("正在打卡并截图...")
+                logger.info(f'[Luogu] 用户 {qq_id} 请求打卡')
+                yield event.plain_result("📸 正在截取打卡页面...")
                 try:
-                    # 先获取打卡结果
-                    result = await _run_async(cfile, qq_id, _task_checkin)
-                    yield event.plain_result(_fmt_checkin(result))
-                    # 然后截图打卡页面
+                    # 截图打卡页面
+                    logger.info(f'[Luogu] 开始截取打卡截图...')
                     img_bytes = await _run_async(cfile, qq_id, _task_screenshot_checkin)
                     img_path = _ensure_image_path(img_bytes)
                     if img_path:
+                        logger.info(f'[Luogu] 打卡截图成功，准备发送...')
                         yield event.image_result(img_path)
+                    else:
+                        logger.warning(f'[Luogu] 打卡截图获取失败')
+                        yield event.plain_result("❌ 无法获取打卡截图")
                 except Exception as e:
                     logger.error(f'[Luogu] checkin error: {traceback.format_exc()}')
                     yield event.plain_result(f"❌ 打卡出错：{e}")
                 return
 
             if sub == 'info':
-                yield event.plain_result("正在获取数据...")
+                logger.info(f'[Luogu] 用户 {qq_id} 请求 info')
+                yield event.plain_result("📊 正在获取个人数据...")
                 try:
+                    logger.info(f'[Luogu] 开始获取个人主页数据...')
                     profile = await _run_async(cfile, qq_id, _task_profile)
                     if not profile:
+                        logger.warning(f'[Luogu] 用户 {qq_id} 获取数据失败')
                         yield event.plain_result("❌ 获取数据失败，请检查账号是否有效")
                         return
+                    logger.info(f'[Luogu] 数据获取完成，准备格式化...')
                     # 使用文字版显示，包含咕值构成和评定比赛
                     text = _fmt_profile(profile)
+                    logger.info(f'[Luogu] info 命令执行完成')
                     yield event.plain_result(text)
                 except Exception as e:
                     logger.error(f'[Luogu] info error: {traceback.format_exc()}')
@@ -591,14 +616,17 @@ if _ASTRBOT:
                 return
 
             if sub == 'heatmap':
-                yield event.plain_result("正在截取热度图...")
+                logger.info(f'[Luogu] 用户 {qq_id} 请求 heatmap')
+                yield event.plain_result("📈 正在截取热度图...")
                 try:
-                    # 直接截图热度图
+                    logger.info(f'[Luogu] 开始截取热度图...')
                     img_bytes = await _run_async(cfile, qq_id, _task_screenshot_heatmap)
                     img_path = _ensure_image_path(img_bytes)
                     if img_path:
+                        logger.info(f'[Luogu] 热度图截图成功，准备发送...')
                         yield event.image_result(img_path)
                     else:
+                        logger.warning(f'[Luogu] 热度图截图获取失败')
                         yield event.plain_result("❌ 无法获取热度图，请确认账号有做题数据")
                 except Exception as e:
                     logger.error(f'[Luogu] heatmap error: {traceback.format_exc()}')
@@ -606,13 +634,16 @@ if _ASTRBOT:
                 return
 
             if sub == 'elo':
-                yield event.plain_result("正在生成等级分趋势图...")
+                logger.info(f'[Luogu] 用户 {qq_id} 请求 elo')
+                yield event.plain_result("📉 正在生成等级分趋势图...")
                 try:
+                    logger.info(f'[Luogu] 开始获取等级分数据...')
                     # 获取等级分数据
                     profile = await _run_async(cfile, qq_id, _task_profile)
                     elo_history = profile.get('elo_history', [])
                     
                     if elo_history:
+                        logger.info(f'[Luogu] 等级分历史: {len(elo_history)} 条，开始生成趋势图...')
                         # 使用生成方案
                         username = profile.get('name', '')
                         img_bytes = await asyncio.get_event_loop().run_in_executor(
@@ -621,10 +652,13 @@ if _ASTRBOT:
                         )
                         img_path = _ensure_image_path(img_bytes)
                         if img_path:
+                            logger.info(f'[Luogu] 趋势图生成成功，准备发送...')
                             yield event.image_result(img_path)
                         else:
+                            logger.warning(f'[Luogu] 趋势图生成失败')
                             yield event.plain_result("❌ 生成趋势图失败")
                     else:
+                        logger.warning(f'[Luogu] 用户 {qq_id} 无等级分数据')
                         yield event.plain_result("❌ 暂无等级分数据，请确认账号有参加比赛记录")
                 except Exception as e:
                     logger.error(f'[Luogu] elo error: {traceback.format_exc()}')
@@ -632,28 +666,36 @@ if _ASTRBOT:
                 return
 
             if sub == 'practice':
-                yield event.plain_result("正在获取练习数据...")
+                logger.info(f'[Luogu] 用户 {qq_id} 请求 practice')
+                yield event.plain_result("📚 正在获取练习数据...")
                 try:
+                    logger.info(f'[Luogu] 开始获取练习数据...')
                     # 先获取文字信息
                     practice = await _run_async(cfile, qq_id, _task_practice)
+                    logger.info(f'[Luogu] 练习数据获取完成，已通过 {practice.get("total_passed", 0)} 题')
                     text = _fmt_practice(practice)
                     yield event.plain_result(text)
                     
                     # 然后截图难度分布
+                    logger.info(f'[Luogu] 开始截取难度分布图...')
                     img_bytes = await _run_async(cfile, qq_id, _task_screenshot_practice)
                     img_path = _ensure_image_path(img_bytes)
                     if img_path:
+                        logger.info(f'[Luogu] 难度分布截图成功，准备发送...')
                         yield event.image_result(img_path)
                     else:
+                        logger.warning(f'[Luogu] 难度分布截图失败，尝试使用生成卡片...')
                         # 兜底：使用难度分布卡片生成
                         passed_data = {d: len(pids) for d, pids in practice.get('passed_by_difficulty', {}).items() if pids}
                         if passed_data:
+                            logger.info(f'[Luogu] 开始生成难度分布卡片...')
                             card_bytes = await asyncio.get_event_loop().run_in_executor(
                                 None,
                                 lambda: generate_difficulty_cards(passed_data, username=practice.get('name', ''))
                             )
                             card_path = _ensure_image_path(card_bytes)
                             if card_path:
+                                logger.info(f'[Luogu] 难度分布卡片生成成功，准备发送...')
                                 yield event.image_result(card_path)
                 except Exception as e:
                     logger.error(f'[Luogu] practice error: {traceback.format_exc()}')

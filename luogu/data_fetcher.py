@@ -616,10 +616,15 @@ class LuoguDataFetcher:
             PNG 字节数据，或 None
         """
         try:
-            # 增加超时时间
-            self.page.goto('https://www.luogu.com.cn/', timeout=30000)
-            self.page.wait_for_load_state('networkidle', timeout=15000)
-            time.sleep(2)
+            logger.info(f'[Luogu] 开始截取打卡页面...')
+            # 减少超时时间，使用 domcontentloaded 加快加载
+            self.page.goto('https://www.luogu.com.cn/', timeout=20000)
+            self.page.wait_for_load_state('domcontentloaded', timeout=10000)
+            time.sleep(1)  # 减少等待时间
+
+            # 滚动到顶部
+            self.page.evaluate('window.scrollTo(0, 0)')
+            time.sleep(0.3)
 
             # 打卡区域选择器 - 尝试多个可能的选择器
             selectors = [
@@ -646,16 +651,16 @@ class LuoguDataFetcher:
                                 'height': min(box['height'] + 20, 500)
                             }
                         )
+                        logger.info(f'[Luogu] 打卡截图成功')
                         return img_bytes
 
             # 如果没找到特定区域，截取整个首页顶部
-            self.page.evaluate('window.scrollTo(0, 0)')
-            time.sleep(0.5)
             img_bytes = self.page.screenshot(type='png')
+            logger.info(f'[Luogu] 打卡截图成功（整页模式）')
             return img_bytes
 
         except Exception as e:
-            print(f"打卡截图失败: {e}")
+            logger.warning(f'[Luogu] 打卡截图失败: {e}')
             return None
 
     def screenshot_heatmap(self) -> Optional[bytes]:
@@ -670,9 +675,10 @@ class LuoguDataFetcher:
             return None
 
         try:
-            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=20000)
-            self.page.wait_for_load_state('networkidle')
-            time.sleep(2)
+            logger.info(f'[Luogu] 开始截取热度图...')
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=15000)
+            self.page.wait_for_load_state('domcontentloaded', timeout=10000)
+            time.sleep(1)  # 减少等待时间
 
             # 热度图选择器
             heatmap = self.page.locator('.heat-map')
@@ -689,12 +695,14 @@ class LuoguDataFetcher:
                             'height': min(box['height'] + 60, 320)
                         }
                     )
+                    logger.info(f'[Luogu] 热度图截图成功')
                     return img_bytes
 
+            logger.warning(f'[Luogu] 未找到热度图元素')
             return None
 
         except Exception as e:
-            print(f"热度图截图失败: {e}")
+            logger.warning(f'[Luogu] 热度图截图失败: {e}')
             return None
 
     def screenshot_rating_trend(self) -> Optional[bytes]:
@@ -709,9 +717,10 @@ class LuoguDataFetcher:
             return None
 
         try:
-            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=20000)
-            self.page.wait_for_load_state('networkidle')
-            time.sleep(2)
+            logger.info(f'[Luogu] 开始截取等级分趋势图...')
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=15000)
+            self.page.wait_for_load_state('domcontentloaded', timeout=10000)
+            time.sleep(1)
 
             # canvas 元素（等级分趋势图）
             canvas = self.page.locator('canvas')
@@ -727,12 +736,14 @@ class LuoguDataFetcher:
                             'height': min(box['height'] + 60, 350)
                         }
                     )
+                    logger.info(f'[Luogu] 等级分趋势图截图成功')
                     return img_bytes
 
+            logger.warning(f'[Luogu] 未找到等级分趋势图元素')
             return None
 
         except Exception as e:
-            print(f"等级分趋势图截图失败: {e}")
+            logger.warning(f'[Luogu] 等级分趋势图截图失败: {e}')
             return None
 
     def screenshot_profile_summary(self) -> Optional[bytes]:
@@ -747,9 +758,10 @@ class LuoguDataFetcher:
             return None
 
         try:
-            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=20000)
-            self.page.wait_for_load_state('networkidle')
-            time.sleep(2)
+            logger.info(f'[Luogu] 开始截取主页统计...')
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=15000)
+            self.page.wait_for_load_state('domcontentloaded', timeout=10000)
+            time.sleep(1)
 
             # 统计区域 - 通常在主页左侧或顶部
             selectors = [
@@ -782,68 +794,78 @@ class LuoguDataFetcher:
                                 'height': min(h, 300)
                             }
                         )
+                        logger.info(f'[Luogu] 主页统计截图成功')
                         return img_bytes
 
             # 兜底：截取整个页面顶部
             img_bytes = self.page.screenshot(type='png', full_page=False)
+            logger.info(f'[Luogu] 主页统计截图成功（整页模式）')
             return img_bytes
 
         except Exception as e:
-            print(f"主页统计截图失败: {e}")
+            logger.warning(f'[Luogu] 主页统计截图失败: {e}')
             return None
 
     def screenshot_practice_difficulty(self) -> Optional[bytes]:
         """
-        截图练习页面的难度分布区域
+        截图练习页面的难度分布区域（包含全部8个难度标签）
 
         Returns:
             PNG 字节数据，或 None
         """
+        from luogu.chart_generator import generate_difficulty_cards
+        
         uid = self._get_uid()
         if not uid:
             return None
 
         try:
-            self.page.goto(f'https://www.luogu.com.cn/user/{uid}/practice', timeout=20000)
-            self.page.wait_for_load_state('networkidle')
-            time.sleep(2)
+            logger.info(f'[Luogu] 开始截取难度分布图...')
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}/practice', timeout=15000)
+            self.page.wait_for_load_state('domcontentloaded', timeout=10000)
+            time.sleep(1)  # 减少等待时间
 
-            # 尝试找到难度分布区域
+            # 滚动到难度统计区域（通常在页面顶部）
+            self.page.evaluate('window.scrollTo(0, 0)')
+            time.sleep(0.5)
+
+            # 尝试找到包含难度标签的更大区域
+            # 难度统计区域通常包含8个难度等级：暂无评定、入门、普及-、普及/提高-、普及+/提高、提高+/省选-、省选/NOI-、NOI/NOI+/CTSC
             selectors = [
-                '[class*="difficulty"]',
-                '.passed-list',
-                '.problem-list',
-                '#app [class*="card"]',
+                'text=难度分布',
+                'text=已通过的题目',
+                '.lg-card',
+                '[class*="practice"]',
+                '#app > div',
             ]
 
             for selector in selectors:
                 elements = self.page.locator(selector)
                 if elements.count() > 0:
-                    # 尝试找到包含难度分布的区域
-                    for i in range(min(elements.count(), 10)):
-                        el = elements.nth(i)
-                        box = el.bounding_box()
-                        if box and box['width'] > 200 and box['height'] > 100:
-                            # 截图并扩展边距
-                            img_bytes = self.page.screenshot(
-                                type='png',
-                                clip={
-                                    'x': max(0, box['x'] - 15),
-                                    'y': max(0, box['y'] - 50),
-                                    'width': min(box['width'] + 30, 900),
-                                    'height': min(box['height'] + 70, 600)
-                                }
-                            )
-                            return img_bytes
+                    el = elements.first
+                    box = el.bounding_box()
+                    if box and box['width'] > 100:
+                        # 增加高度以包含所有8个难度标签（从灰色到黑色）
+                        # 截图区域：向右扩展宽度，向上下扩展高度
+                        img_bytes = self.page.screenshot(
+                            type='png',
+                            clip={
+                                'x': max(0, box['x'] - 20),
+                                'y': max(0, box['y'] - 80),  # 增加上边距
+                                'width': min(box['width'] + 40, 1200),
+                                'height': min(box['height'] + 160, 800)  # 大幅增加高度确保包含所有难度
+                            }
+                        )
+                        logger.info(f'[Luogu] 难度分布截图成功')
+                        return img_bytes
 
-            # 兜底：截取整个练习页面
-            self.page.evaluate('window.scrollTo(0, 0)')
-            time.sleep(0.5)
+            # 如果没找到特定区域，尝试截取整个可视区域
             img_bytes = self.page.screenshot(type='png', full_page=False)
+            logger.info(f'[Luogu] 使用整页截图作为兜底')
             return img_bytes
 
         except Exception as e:
-            print(f"难度分布截图失败: {e}")
+            logger.warning(f'[Luogu] 难度分布截图失败: {e}')
             return None
 
 
