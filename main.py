@@ -246,7 +246,7 @@ def _do_login(username: str, password: str, qq_id: str) -> Dict:
             cookies = context.cookies()
             uid = None
             for c in cookies:
-                if c.get('name') == '__uid':
+                if c.get('name') in ('__uid', '_uid'):
                     uid = str(c['value'])
                     break
 
@@ -413,6 +413,9 @@ if _ASTRBOT:
                         yield event.plain_result("❌ 获取数据失败，请检查账号是否有效")
                         return
                     img_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_summary_card(profile))
+                    # 确保返回 bytes
+                    if isinstance(img_bytes, str):
+                        img_bytes = img_bytes.encode('utf-8')
                     yield event.image_result(img_bytes)
                 except Exception as e:
                     logger.error(f'[Luogu] info error: {traceback.format_exc()}')
@@ -429,6 +432,8 @@ if _ASTRBOT:
                         yield event.plain_result("暂无做题热度数据")
                         return
                     img_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_heatmap(daily, username=username))
+                    if isinstance(img_bytes, str):
+                        img_bytes = img_bytes.encode('utf-8')
                     yield event.image_result(img_bytes)
                 except Exception as e:
                     logger.error(f'[Luogu] heatmap error: {traceback.format_exc()}')
@@ -445,6 +450,8 @@ if _ASTRBOT:
                         yield event.plain_result("暂无比赛等级分数据")
                         return
                     img_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_elo_trend(elo_history, username=username))
+                    if isinstance(img_bytes, str):
+                        img_bytes = img_bytes.encode('utf-8')
                     yield event.image_result(img_bytes)
                 except Exception as e:
                     logger.error(f'[Luogu] elo error: {traceback.format_exc()}')
@@ -460,6 +467,8 @@ if _ASTRBOT:
                     bar_data = {d: len(pids) for d, pids in by_diff.items() if pids}
                     if bar_data:
                         img_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_bar_chart(bar_data, title=f"{practice.get('total_passed', 0)} 题按难度分布", ylabel='题数', color='#1890ff'))
+                        if isinstance(img_bytes, str):
+                            img_bytes = img_bytes.encode('utf-8')
                         yield event.plain_result(text)
                         yield event.image_result(img_bytes)
                     else:
