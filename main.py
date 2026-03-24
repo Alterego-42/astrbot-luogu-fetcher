@@ -137,6 +137,24 @@ def _task_all(fetcher: LuoguDataFetcher) -> Dict:
     return fetcher.fetch_all()
 
 
+# ── 截图任务 ──────────────────────────────────────────────────
+
+def _task_screenshot_checkin(fetcher: LuoguDataFetcher) -> Optional[bytes]:
+    return fetcher.screenshot_checkin()
+
+
+def _task_screenshot_heatmap(fetcher: LuoguDataFetcher) -> Optional[bytes]:
+    return fetcher.screenshot_heatmap()
+
+
+def _task_screenshot_rating(fetcher: LuoguDataFetcher) -> Optional[bytes]:
+    return fetcher.screenshot_rating_trend()
+
+
+def _task_screenshot_profile(fetcher: LuoguDataFetcher) -> Optional[bytes]:
+    return fetcher.screenshot_profile_summary()
+
+
 # ════════════════════════════════════════════════════════════════
 # 登录（同步 Playwright，需在线程中运行）
 # ════════════════════════════════════════════════════════════════
@@ -396,10 +414,17 @@ if _ASTRBOT:
                 return
 
             if sub == 'checkin':
-                yield event.plain_result("正在打卡...")
+                yield event.plain_result("正在打卡并截图...")
                 try:
+                    # 先获取打卡结果
                     result = await _run_async(cfile, qq_id, _task_checkin)
                     yield event.plain_result(_fmt_checkin(result))
+                    # 然后截图打卡页面
+                    img_bytes = await _run_async(cfile, qq_id, _task_screenshot_checkin)
+                    if img_bytes:
+                        if isinstance(img_bytes, str):
+                            img_bytes = img_bytes.encode('utf-8')
+                        yield event.image_result(img_bytes)
                 except Exception as e:
                     logger.error(f'[Luogu] checkin error: {traceback.format_exc()}')
                     yield event.plain_result(f"❌ 打卡出错：{e}")
@@ -412,47 +437,50 @@ if _ASTRBOT:
                     if not profile:
                         yield event.plain_result("❌ 获取数据失败，请检查账号是否有效")
                         return
-                    img_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_summary_card(profile))
-                    # 确保返回 bytes
-                    if isinstance(img_bytes, str):
-                        img_bytes = img_bytes.encode('utf-8')
-                    yield event.image_result(img_bytes)
+                    # 截图主页统计
+                    img_bytes = await _run_async(cfile, qq_id, _task_screenshot_profile)
+                    if img_bytes:
+                        if isinstance(img_bytes, str):
+                            img_bytes = img_bytes.encode('utf-8')
+                        yield event.image_result(img_bytes)
+                    else:
+                        # 兜底：使用 matplotlib 生成
+                        card_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_summary_card(profile))
+                        if isinstance(card_bytes, str):
+                            card_bytes = card_bytes.encode('utf-8')
+                        yield event.image_result(card_bytes)
                 except Exception as e:
                     logger.error(f'[Luogu] info error: {traceback.format_exc()}')
                     yield event.plain_result(f"❌ 获取数据出错：{e}")
                 return
 
             if sub == 'heatmap':
-                yield event.plain_result("正在生成热度图...")
+                yield event.plain_result("正在截取热度图...")
                 try:
-                    profile = await _run_async(cfile, qq_id, _task_profile)
-                    daily = profile.get('daily_counts', {})
-                    username = profile.get('name', '')
-                    if not daily:
-                        yield event.plain_result("暂无做题热度数据")
-                        return
-                    img_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_heatmap(daily, username=username))
-                    if isinstance(img_bytes, str):
-                        img_bytes = img_bytes.encode('utf-8')
-                    yield event.image_result(img_bytes)
+                    # 直接截图热度图
+                    img_bytes = await _run_async(cfile, qq_id, _task_screenshot_heatmap)
+                    if img_bytes:
+                        if isinstance(img_bytes, str):
+                            img_bytes = img_bytes.encode('utf-8')
+                        yield event.image_result(img_bytes)
+                    else:
+                        yield event.plain_result("❌ 无法获取热度图，请确认账号有做题数据")
                 except Exception as e:
                     logger.error(f'[Luogu] heatmap error: {traceback.format_exc()}')
                     yield event.plain_result(f"❌ 生成热度图出错：{e}")
                 return
 
             if sub == 'elo':
-                yield event.plain_result("正在生成等级分趋势图...")
+                yield event.plain_result("正在截取等级分趋势图...")
                 try:
-                    profile = await _run_async(cfile, qq_id, _task_profile)
-                    elo_history = profile.get('elo_history', [])
-                    username = profile.get('name', '')
-                    if not elo_history:
-                        yield event.plain_result("暂无比赛等级分数据")
-                        return
-                    img_bytes = await asyncio.get_event_loop().run_in_executor(None, lambda: generate_elo_trend(elo_history, username=username))
-                    if isinstance(img_bytes, str):
-                        img_bytes = img_bytes.encode('utf-8')
-                    yield event.image_result(img_bytes)
+                    # 直接截图等级分趋势图
+                    img_bytes = await _run_async(cfile, qq_id, _task_screenshot_rating)
+                    if img_bytes:
+                        if isinstance(img_bytes, str):
+                            img_bytes = img_bytes.encode('utf-8')
+                        yield event.image_result(img_bytes)
+                    else:
+                        yield event.plain_result("❌ 无法获取等级分趋势图，请确认账号有比赛记录")
                 except Exception as e:
                     logger.error(f'[Luogu] elo error: {traceback.format_exc()}')
                     yield event.plain_result(f"❌ 生成趋势图出错：{e}")

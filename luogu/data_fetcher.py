@@ -587,6 +587,192 @@ class LuoguDataFetcher:
         }
 
 
+    # ════════════════════════════════════════════════════════════════
+    # 截图功能
+    # ════════════════════════════════════════════════════════════════
+
+    def screenshot_checkin(self) -> Optional[bytes]:
+        """
+        截图打卡页面（包含忌、宜推荐等）
+
+        Returns:
+            PNG 字节数据，或 None
+        """
+        try:
+            self.page.goto('https://www.luogu.com.cn/', timeout=15000)
+            self.page.wait_for_load_state('networkidle')
+            time.sleep(2)
+
+            # 打卡区域选择器 - 尝试多个可能的选择器
+            selectors = [
+                '.lg-punch',
+                '.punch-card',
+                '[class*="punch"]',
+                '.index-punch',
+                '#app .lg-punch',
+            ]
+
+            for selector in selectors:
+                elements = self.page.locator(selector)
+                if elements.count() > 0:
+                    el = elements.first
+                    box = el.bounding_box()
+                    if box and box['width'] > 50 and box['height'] > 50:
+                        # 截图并扩展边距
+                        img_bytes = self.page.screenshot(
+                            type='png',
+                            clip={
+                                'x': max(0, box['x'] - 10),
+                                'y': max(0, box['y'] - 10),
+                                'width': min(box['width'] + 20, 600),
+                                'height': min(box['height'] + 20, 500)
+                            }
+                        )
+                        return img_bytes
+
+            # 如果没找到特定区域，截取整个首页顶部
+            self.page.evaluate('window.scrollTo(0, 0)')
+            time.sleep(0.5)
+            img_bytes = self.page.screenshot(type='png')
+            return img_bytes
+
+        except Exception as e:
+            print(f"打卡截图失败: {e}")
+            return None
+
+    def screenshot_heatmap(self) -> Optional[bytes]:
+        """
+        截图个人主页的做题热度图（洛谷原版样式）
+
+        Returns:
+            PNG 字节数据，或 None
+        """
+        uid = self._get_uid()
+        if not uid:
+            return None
+
+        try:
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=15000)
+            self.page.wait_for_load_state('networkidle')
+            time.sleep(2)
+
+            # 热度图选择器
+            heatmap = self.page.locator('.heat-map')
+            if heatmap.count() > 0:
+                box = heatmap.bounding_box()
+                if box and box['width'] > 50:
+                    img_bytes = self.page.screenshot(
+                        type='png',
+                        clip={
+                            'x': max(0, box['x'] - 10),
+                            'y': max(0, box['y'] - 50),
+                            'width': min(box['width'] + 20, 950),
+                            'height': min(box['height'] + 60, 320)
+                        }
+                    )
+                    return img_bytes
+
+            return None
+
+        except Exception as e:
+            print(f"热度图截图失败: {e}")
+            return None
+
+    def screenshot_rating_trend(self) -> Optional[bytes]:
+        """
+        截图等级分趋势图（canvas 元素）
+
+        Returns:
+            PNG 字节数据，或 None
+        """
+        uid = self._get_uid()
+        if not uid:
+            return None
+
+        try:
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=15000)
+            self.page.wait_for_load_state('networkidle')
+            time.sleep(2)
+
+            # canvas 元素（等级分趋势图）
+            canvas = self.page.locator('canvas')
+            if canvas.count() > 0:
+                box = canvas.bounding_box()
+                if box and box['width'] > 50:
+                    img_bytes = self.page.screenshot(
+                        type='png',
+                        clip={
+                            'x': max(0, box['x'] - 10),
+                            'y': max(0, box['y'] - 50),
+                            'width': min(box['width'] + 20, 950),
+                            'height': min(box['height'] + 60, 350)
+                        }
+                    )
+                    return img_bytes
+
+            return None
+
+        except Exception as e:
+            print(f"等级分趋势图截图失败: {e}")
+            return None
+
+    def screenshot_profile_summary(self) -> Optional[bytes]:
+        """
+        截图个人主页统计卡片区域
+
+        Returns:
+            PNG 字节数据，或 None
+        """
+        uid = self._get_uid()
+        if not uid:
+            return None
+
+        try:
+            self.page.goto(f'https://www.luogu.com.cn/user/{uid}', timeout=15000)
+            self.page.wait_for_load_state('networkidle')
+            time.sleep(2)
+
+            # 统计区域 - 通常在主页左侧或顶部
+            selectors = [
+                '.stat-text',
+                '.user-stat',
+                '[class*="stat"]',
+                '.summary-card',
+                '#app .stat',
+            ]
+
+            for selector in selectors:
+                elements = self.page.locator(selector)
+                if elements.count() > 3:  # 至少3个统计项
+                    # 获取第一个和最后一个元素来确定范围
+                    first = elements.first.bounding_box()
+                    last = elements.last.bounding_box()
+                    if first and last:
+                        x = min(first['x'], last['x']) - 10
+                        y = min(first['y'], last['y']) - 50
+                        w = max(first['x'] + first['width'], last['x'] + last['width']) - min(first['x'], last['x']) + 20
+                        h = max(first['y'] + first['height'], last['y'] + last['height']) - min(first['y'], last['y']) + 60
+
+                        img_bytes = self.page.screenshot(
+                            type='png',
+                            clip={
+                                'x': max(0, x),
+                                'y': max(0, y),
+                                'width': min(w, 400),
+                                'height': min(h, 300)
+                            }
+                        )
+                        return img_bytes
+
+            # 兜底：截取整个页面顶部
+            img_bytes = self.page.screenshot(type='png', full_page=False)
+            return img_bytes
+
+        except Exception as e:
+            print(f"主页统计截图失败: {e}")
+            return None
+
+
 # ── 便捷函数 ──────────────────────────────────────────────────
 
 def fetch_user_data(cookies_file: str, user_id: str = None) -> Dict:
