@@ -7,9 +7,17 @@ import json
 import time
 import os
 import datetime
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from playwright.sync_api import sync_playwright, Page
+
+# 尝试导入 AstrBot 的 logger，否则使用标准 logging
+try:
+    from astrbot.api import logger
+except ImportError:
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+    logger = logging.getLogger('luogu_plugin')
 
 
 # 难度映射
