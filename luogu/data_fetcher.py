@@ -321,8 +321,10 @@ class LuoguDataFetcher:
             ]
         )
         # 设置浏览器上下文
+        # device_scale_factor=2 → Retina 级别截图，物理像素翻倍，清晰度大幅提升
         self.context = self.browser.new_context(
-            viewport={'width': 1280, 'height': 720},
+            viewport={'width': 1440, 'height': 900},
+            device_scale_factor=2,
             ignore_https_errors=True,
         )
         self._load_cookies()
@@ -693,14 +695,14 @@ class LuoguDataFetcher:
                         el = elements.first
                         box = el.bounding_box()
                         if box and box['width'] > 50 and box['height'] > 50:
+                            vp = self.page.viewport_size or {'width': 1440, 'height': 900}
+                            x = max(0, box['x'] - 10)
+                            y = max(0, box['y'] - 10)
+                            w = min(box['width'] + 20, vp['width'] - x)
+                            h = min(box['height'] + 20, vp['height'] - y)
                             img_bytes = self.page.screenshot(
                                 type='png',
-                                clip={
-                                    'x': max(0, box['x'] - 10),
-                                    'y': max(0, box['y'] - 10),
-                                    'width': min(box['width'] + 20, 600),
-                                    'height': min(box['height'] + 20, 500)
-                                }
+                                clip={'x': x, 'y': y, 'width': max(w, 1), 'height': max(h, 1)}
                             )
                             logger.info(f'[Luogu] 打卡截图成功')
                             return img_bytes
@@ -755,14 +757,14 @@ class LuoguDataFetcher:
             if heatmap.count() > 0:
                 box = heatmap.bounding_box()
                 if box and box['width'] > 50:
+                    vp = self.page.viewport_size or {'width': 1440, 'height': 900}
+                    x = max(0, box['x'] - 24)
+                    y = max(0, box['y'] - 50)
+                    w = min(box['width'] + 48, vp['width'] - x)
+                    h = min(box['height'] + 60, vp['height'] - y)
                     img_bytes = self.page.screenshot(
                         type='png',
-                        clip={
-                            'x': max(0, box['x'] - 24),
-                            'y': max(0, box['y'] - 50),
-                            'width': min(box['width'] + 48, 1000),
-                            'height': min(box['height'] + 60, 320)
-                        }
+                        clip={'x': x, 'y': y, 'width': max(w, 1), 'height': max(h, 1)}
                     )
                     logger.info(f'[Luogu] 热度图截图成功')
                     return img_bytes
@@ -805,14 +807,14 @@ class LuoguDataFetcher:
             if canvas.count() > 0:
                 box = canvas.bounding_box()
                 if box and box['width'] > 50:
+                    vp = self.page.viewport_size or {'width': 1440, 'height': 900}
+                    x = max(0, box['x'] - 24)
+                    y = max(0, box['y'] - 50)
+                    w = min(box['width'] + 48, vp['width'] - x)
+                    h = min(box['height'] + 60, vp['height'] - y)
                     img_bytes = self.page.screenshot(
                         type='png',
-                        clip={
-                            'x': max(0, box['x'] - 24),
-                            'y': max(0, box['y'] - 50),
-                            'width': min(box['width'] + 48, 1000),
-                            'height': min(box['height'] + 60, 350)
-                        }
+                        clip={'x': x, 'y': y, 'width': max(w, 1), 'height': max(h, 1)}
                     )
                     logger.info(f'[Luogu] 等级分趋势图截图成功')
                     return img_bytes
@@ -870,14 +872,14 @@ class LuoguDataFetcher:
                         y = min(first['y'], last['y']) - 50
                         w = max(first['x'] + first['width'], last['x'] + last['width']) - min(first['x'], last['x']) + 48
                         h = max(first['y'] + first['height'], last['y'] + last['height']) - min(first['y'], last['y']) + 60
-
+                        vp = self.page.viewport_size or {'width': 1440, 'height': 900}
                         img_bytes = self.page.screenshot(
                             type='png',
                             clip={
                                 'x': max(0, x),
                                 'y': max(0, y),
-                                'width': min(w, 450),
-                                'height': min(h, 300)
+                                'width': max(min(w, vp['width'] - max(0, x)), 1),
+                                'height': max(min(h, vp['height'] - max(0, y)), 1),
                             }
                         )
                         logger.info(f'[Luogu] 主页统计截图成功')

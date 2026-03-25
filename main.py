@@ -88,6 +88,10 @@ def _uid_file(qq_id: str) -> Path:
     return COOKIES_DIR / f'cookies_{qq_id}_uid.txt'
 
 
+def _userdata_path(qq_id: str) -> Path:
+    return DATA_DIR / f'userdata_{qq_id}.json'
+
+
 def _get_uid_for_qq(qq_id: str) -> Optional[str]:
     """从绑定表 / uid 缓存文件获取 uid"""
     bindings = _load_bindings()
@@ -235,19 +239,53 @@ def _do_login(username: str, password: str, qq_id: str) -> Dict:
             page.fill('input[type="password"]', password)
             time.sleep(0.5)
 
-            # 4. 处理验证码（最多5次 OCR 或直接点提交）
+            # 4. 处理验证码（最多5次 OCR 重试）
             captcha_solved = False
-            for attempt in range(5):
-                # 先关闭可能存在的错误弹窗
+
+            def _close_swal_popup():
+                """关闭 sweetalert2 弹窗，使用 JS 兜底，避免元素不可见时卡住"""
                 try:
-                    close_btn = page.query_selector('.swal2-close') or page.query_selector('button.swal2-confirm')
-                    if close_btn and page.is_visible('.swal2-popup'):
-                        close_btn.click()
-                        time.sleep(0.5)
+                    # 优先用 JS 点击，无需元素可见
+                    page.evaluate("""
+                        (() => {
+                            const btn = document.querySelector('.swal2-confirm') ||
+                                        document.querySelector('.swal2-close');
+                            if (btn) btn.click();
+                        })()
+                    """)
+                    time.sleep(0.4)
                 except Exception:
                     pass
 
-                # 尝试获取验证码图片
+            def _click_captcha_refresh():
+                """点击验证码图片以刷新"""
+                try:
+                    captcha_img = (
+                        page.query_selector('img[src*="captcha"]') or
+                        page.query_selector('.captcha-img img') or
+                        page.query_selector('img[alt*="验证码"]')
+                    )
+                    if captcha_img:
+                        captcha_img.click()
+                        time.sleep(0.6)
+                except Exception:
+                    pass
+
+            for attempt in range(5):
+                logger.info(f'[Luogu] 验证码登录第 {attempt + 1} 次尝试')
+
+                # 关闭可能存在的弹窗
+                _close_swal_popup()
+
+                # 每次循环都重新填写密码（验证码错误后密码框可能被清空）
+                try:
+                    pwd_input = page.query_selector('input[type="password"]')
+                    if pwd_input:
+                        pwd_input.fill(password)
+                except Exception:
+                    pass
+
+                # 获取验证码图片并 OCR
                 captcha_img = (
                     page.query_selector('img[src*="captcha"]') or
                     page.query_selector('.captcha-img img') or
@@ -258,7 +296,6 @@ def _do_login(username: str, password: str, qq_id: str) -> Dict:
                     try:
                         import ddddocr
                         ocr = ddddocr.DdddOcr(show_ad=False)
-                        # 截图验证码区域
                         cap_bytes = captcha_img.screenshot()
                         code = ocr.classification(cap_bytes)
                         logger.info(f'[Luogu] 验证码OCR结果: {code}')
@@ -268,6 +305,7 @@ def _do_login(username: str, password: str, qq_id: str) -> Dict:
                             page.query_selector('input[type="text"]:not([placeholder*="用户"])')
                         )
                         if cap_input:
+                            cap_input.fill('')   # 先清空
                             cap_input.fill(code)
                     except ImportError:
                         logger.warning('[Luogu] ddddocr 未安装，跳过验证码自动识别')
@@ -300,19 +338,10 @@ def _do_login(username: str, password: str, qq_id: str) -> Dict:
                     if page.is_visible('text=密码错误') or page.is_visible('text=账号或密码'):
                         browser.close()
                         return {'success': False, 'message': '账号或密码错误', 'uid': None}
-                    # 验证码错误：关闭弹窗后直接继续循环重试
-                    # 页面通常会自动刷新验证码，无需手动点击刷新
-                    try:
-                        if page.is_visible('.swal2-popup'):
-                            close_btn = page.query_selector('.swal2-close')
-                            if close_btn:
-                                # 快速点击，5秒超时，避免长时间卡住
-                                close_btn.click(timeout=5000)
-                                time.sleep(0.5)
-                        logger.info(f'[Luogu] 验证码识别错误，准备重试...')
-                    except Exception as e:
-                        # 关闭失败也继续重试，不要阻塞
-                        logger.warning(f'[Luogu] 关闭验证码弹窗失败: {e}')
+                    # 验证码错误：关闭弹窗，刷新验证码，继续重试
+                    logger.info(f'[Luogu] 第 {attempt + 1} 次验证码识别错误，关闭弹窗并刷新验证码...')
+                    _close_swal_popup()
+                    _click_captcha_refresh()
 
             if not captcha_solved:
                 browser.close()
