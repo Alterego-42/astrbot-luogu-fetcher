@@ -8,6 +8,7 @@
   /luogu heatmap                做题热度日历图（近26周）
   /luogu elo                    比赛等级分趋势图
   /luogu practice               查看练习情况（按难度分类通过题数）
+  /luogu jump                   题库跳转（多轮对话，支持筛选+随机/指定题目+题面截图）
   /luogu help                   显示帮助
 
 支持平台：aiocqhttp、qq_official
@@ -35,6 +36,7 @@ try:
     from astrbot.api.star import Context, Star, register
     from astrbot.api import logger
     from astrbot.api.message_components import Face, Plain
+    from astrbot.core.utils.session_waiter import session_waiter, SessionController
     _ASTRBOT = True
 except ImportError:
     _ASTRBOT = False
@@ -45,6 +47,8 @@ except ImportError:
 
 # ── 插件内部模块 ──────────────────────────────────────────────
 from luogu.data_fetcher import LuoguDataFetcher
+from luogu.problem_fetcher import ProblemFetcher
+from luogu.tags import DIFFICULTY_NAMES, HOT_TAGS, fuzzy_match_tag, DIFFICULTY_COLORS
 from luogu.chart_generator import (
     generate_summary_card,
     generate_heatmap,
@@ -521,6 +525,782 @@ def _fmt_checkin(result: Dict) -> str:
     return msg
 
 
+# ════════════════════════════════════════════════════════════════
+# /jump 题库跳转：5步状态机会话
+# ════════════════════════════════════════════════════════════════
+
+# 题面 HTML 渲染模板（备用：用于 html_render / html_to_pic）
+PROBLEM_HTML_TMPL = '''<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: #f5f6fa;
+    padding: 16px;
+  }
+  .card {
+    background: white;
+    border-radius: 10px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    overflow: hidden;
+  }
+  .header {
+    background: linear-gradient(135deg, #1890ff, #722ed1);
+    color: white;
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .pid {
+    background: rgba(255,255,255,0.2);
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .title {
+    font-size: 17px;
+    font-weight: 600;
+    flex: 1;
+  }
+  .difficulty-badge {
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .meta {
+    padding: 10px 20px;
+    border-bottom: 1px solid #f0f0f0;
+    display: flex;
+    gap: 16px;
+    font-size: 13px;
+    color: #666;
+    flex-wrap: wrap;
+  }
+  .meta span { display: flex; align-items: center; gap: 4px; }
+  .tags {
+    padding: 10px 20px;
+    border-bottom: 1px solid #f0f0f0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .tag {
+    background: #e6f7ff;
+    color: #1890ff;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .content {
+    padding: 20px;
+    line-height: 1.8;
+    font-size: 15px;
+    color: #222;
+    max-width: 800px;
+  }
+  .content h3 {
+    color: #1890ff;
+    margin: 16px 0 8px;
+    font-size: 15px;
+  }
+  .content h3:first-child { margin-top: 0; }
+  .content p { margin: 8px 0; }
+  .content pre {
+    background: #f7f8fa;
+    border: 1px solid #e8e8e8;
+    border-radius: 6px;
+    padding: 12px;
+    margin: 10px 0;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .content code {
+    font-family: "Fira Code", "Cascadia Code", Consolas, monospace;
+    font-size: 13px;
+  }
+  .content ul, .content ol {
+    padding-left: 24px;
+    margin: 8px 0;
+  }
+  .content li { margin: 4px 0; }
+  .content table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 10px 0;
+  }
+  .content th, .content td {
+    border: 1px solid #e8e8e8;
+    padding: 6px 12px;
+    text-align: left;
+    font-size: 13px;
+  }
+  .content th { background: #f7f8fa; font-weight: 600; }
+  .footer {
+    padding: 10px 20px;
+    border-top: 1px solid #f0f0f0;
+    font-size: 12px;
+    color: #999;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="header">
+    <span class="pid">{{ pid }}</span>
+    <span class="title">{{ title }}</span>
+    <span class="difficulty-badge" style="background:{{ diff_bg }};color:{{ diff_color }}">{{ diff_name }}</span>
+  </div>
+  <div class="meta">
+    {% if passed_rate %}<span>📊 通过率 {{ passed_rate }}</span>{% endif %}
+    {% if submit_count %}<span>📝 提交 {{ submit_count }}</span>{% endif %}
+  </div>
+  {% if tags %}
+  <div class="tags">
+    {% for tag in tags %}
+    <span class="tag">{{ tag }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <div class="content">
+    {{ content | safe }}
+  </div>
+  <div class="footer">洛谷题库 · {{ url }}</div>
+</div>
+</body>
+</html>
+'''
+
+
+def _build_problem_html(detail: dict) -> str:
+    """用 Jinja2 模板构建题面 HTML（用于 html_render）"""
+    diff_name = detail.get('difficulty_name', '暂无评定')
+    diff_bg = DIFFICULTY_COLORS.get(diff_name, '#ebedf0')
+    # 白色文字用于深色背景
+    diff_color = '#fff'
+
+    content = detail.get('content_html', '')
+    if not content:
+        # 兜底：markdown 转简单 HTML
+        content = detail.get('content_md', '')
+
+    return PROBLEM_HTML_TMPL.format(
+        pid=detail.get('pid', 'P????'),
+        title=detail.get('title', '未知题目'),
+        diff_name=diff_name,
+        diff_bg=diff_bg,
+        diff_color=diff_color,
+        passed_rate=detail.get('passed_rate', ''),
+        submit_count=detail.get('submit_count', ''),
+        tags=detail.get('tags', [])[:10],
+        content=content,
+        url=detail.get('url', ''),
+    )
+
+
+# ════════════════════════════════════════════════════════════════
+# /jump 题库跳转：5步状态机会话
+# ════════════════════════════════════════════════════════════════
+
+_JUMP_STEP_TEXT = {
+    'difficulty': (
+        "━━━ Step 1：难度筛选 ━━━\n\n"
+        "请选择题目难度（输入数字 0-8）：\n\n"
+        "  0. 跳过（不限难度）\n"
+        "  1. 暂无评定\n"
+        "  2. 入门\n"
+        "  3. 普及−\n"
+        "  4. 普及/提高−\n"
+        "  5. 普及+/提高\n"
+        "  6. 提高+/省选−\n"
+        "  7. 省选/NOI−\n"
+        "  8. NOI/NOI+/CTSC\n\n"
+        "直接发送数字即可，如：2"
+    ),
+    'tags': (
+        "━━━ Step 2：标签筛选 ━━━\n\n"
+        "请输入算法/来源/时间/特殊标签：\n\n"
+        "  输入 +标签  添加（如 +动规）\n"
+        "  输入 -标签  移除（如 -动规）\n"
+        "  输入 done  确认筛选\n\n"
+        "支持模糊匹配，如：+图论、+DP、+字符串\n\n"
+        "当前已选标签：{current_tags}\n\n"
+        "示例：\n"
+        "  +动规  → 添加「动态规划」\n"
+        "  -搜索  → 移除「搜索」\n"
+        "  done   → 确认并进入下一步"
+    ),
+    'keyword': (
+        "━━━ Step 3：关键词筛选（可选） ━━━\n\n"
+        "请输入标题关键词（直接输入，留空跳过）：\n\n"
+        "  输入 skip 跳过此步\n"
+        "  或直接输入关键词，如：模拟、贪心\n\n"
+        "当前筛选条件：\n"
+        "  难度：{difficulty_str}\n"
+        "  标签：{tags_str}\n"
+        "  关键词：{keyword_str}"
+    ),
+    'result': (
+        "━━━ Step 4：筛选结果 ━━━\n\n"
+        "共筛选出 {total} 道题\n\n"
+        "  请输入序号（1-{total}）选题\n"
+        "  或输入 random 随机选一道\n"
+        "  或输入 back 返回修改筛选\n\n"
+        "当前筛选条件：\n"
+        "  难度：{difficulty_str}\n"
+        "  标签：{tags_str}\n"
+        "  关键词：{keyword_str}"
+    ),
+}
+
+
+def _jump_diff_str(state):
+    # state['difficulty'] 是用户选项数字（0=不限, 1=暂无评定, 2=入门, 3=普及-, ...）
+    # DIFFICULTY_NAMES 是 0-indexed（0=暂无评定, 1=入门, 2=普及-, ...）
+    d = state.get('difficulty')
+    if d is None:
+        return '不限'
+    # 用户选项 1=暂无评定(difficulty=0), 2=入门(difficulty=1), 3=普及-(difficulty=2), ...
+    return DIFFICULTY_NAMES[d - 1] if 1 <= d <= 8 else '不限'
+
+
+def _jump_tags_str(state):
+    return '、'.join(state['tags']) if state['tags'] else '无'
+
+
+def _jump_kw_str(state):
+    return state.get('keyword') or '无'
+
+
+async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
+    """
+    多轮题库跳转（5步状态机）。
+
+    状态流转：
+      difficulty → tags → keyword → result → [选题] → result
+
+    关键设计：使用单一 ProblemFetcher 实例贯穿整个会话，
+    避免每次操作创建新实例导致 page 状态丢失。
+    """
+    import astrbot.api.message_components as Comp
+    _cookies = cookies_file
+
+    # --- 状态初始化 ---
+    state = {
+        'difficulty': None,
+        'tags': [],
+        'keyword': None,
+        'total': 0,
+        'list_url': None,       # 题库列表页 URL（apply_filters 后保存）
+        'page_size': 50,        # 每页题数（apply_filters 时动态检测）
+    }
+    step = ['difficulty']
+
+    # --- 单一 ProblemFetcher 实例（贯穿整个会话） ---
+    fetcher: ProblemFetcher = None
+
+    async def _send_text(text: str):
+        mr = event.make_result()
+        mr.chain = [Comp.Plain(text)]
+        await event.send(mr)
+
+    async def _send_img(img_path: str):
+        mr = event.make_result()
+        mr.chain = [Comp.Image(path=img_path)]
+        await event.send(mr)
+
+    async def _show_current_step():
+        s = step[0]
+        if s == 'tags':
+            await _send_text(_JUMP_STEP_TEXT['tags'].format(
+                current_tags=_jump_tags_str(state) or '（无）'
+            ))
+        elif s == 'keyword':
+            await _send_text(_JUMP_STEP_TEXT['keyword'].format(
+                difficulty_str=_jump_diff_str(state),
+                tags_str=_jump_tags_str(state),
+                keyword_str=_jump_kw_str(state),
+            ))
+        elif s == 'result':
+            await _send_text(_JUMP_STEP_TEXT['result'].format(
+                total=state['total'],
+                difficulty_str=_jump_diff_str(state),
+                tags_str=_jump_tags_str(state),
+                keyword_str=_jump_kw_str(state),
+            ))
+
+    async def _apply_filters() -> bool:
+        nonlocal fetcher
+        try:
+            # 使用单一实例
+            if fetcher is None:
+                fetcher = ProblemFetcher(_cookies)
+                fetcher.setup()
+            else:
+                # 复用已有实例，确保 page 有效
+                logger.info('[Luogu jump] 复用已有 ProblemFetcher 实例')
+
+            def _do_apply():
+                user_diff = state.get('difficulty')
+                url_difficulty = (user_diff - 1) if user_diff is not None else None
+                return fetcher.apply_filters(
+                    difficulty=url_difficulty,
+                    tags=state['tags'] if state['tags'] else None,
+                    keyword=state['keyword'] if state['keyword'] else None,
+                )
+
+            r = await asyncio.to_thread(_do_apply)
+            if not r.get('success'):
+                await _send_text(f'❌ 筛选失败：{r.get("message", "未知错误")}')
+                return False
+            state['total'] = r.get('total', 0)
+            state['list_url'] = r.get('list_url')
+            state['page_size'] = r.get('page_size_detected', 50)
+            logger.info(f'[Luogu jump] 筛选完成: total={state["total"]}, page_size={state["page_size"]}, list_url={state["list_url"]}')
+            return True
+        except Exception as e:
+            logger.error(f'[Luogu jump] 筛选异常: {traceback.format_exc()}')
+            await _send_text(f'❌ 筛选出错：{e}')
+            return False
+
+    async def _show_problem(position: int = None):
+        """
+        展示题目：先发送 Markdown + 点击指令，用户点击后再渲染图片。
+        
+        流程：
+        1. 跳转并获取题目信息
+        2. 发送题目摘要（标题、难度、链接）
+        3. 发送 Markdown 题面文本 + 点击指令
+        4. 用户输入「看图」或点击按钮后，发送渲染图片
+        """
+        nonlocal fetcher
+        try:
+            # 使用同一实例（如未初始化则新建）
+            if fetcher is None:
+                fetcher = ProblemFetcher(_cookies)
+                fetcher.setup()
+                # 恢复题库列表页
+                if state.get('list_url'):
+                    def _goto_list():
+                        fetcher.page.goto(state['list_url'], timeout=20000)
+                        fetcher.page.wait_for_load_state('domcontentloaded', timeout=15000)
+                        import time as _time; _time.sleep(1.5)
+                    await asyncio.to_thread(_goto_list)
+
+            def _do_show():
+                if position:
+                    # 传入 list_url 用于 page 失效时恢复
+                    pid = fetcher.navigate_to_problem(position, list_url=state.get('list_url'))
+                    if not pid:
+                        return None, None, None, f'❌ 跳转题目失败（page_size={state.get("page_size")}, list_url={state.get("list_url")}）'
+                import re as _re
+                url = fetcher.page.url
+                pid_m = _re.search(r'/problem/(P?\w+)', url, _re.IGNORECASE)
+                pid = pid_m.group(1) if pid_m else '???'
+                if not pid.upper().startswith('P'):
+                    pid = 'P' + pid.upper().lstrip('P')
+                detail = fetcher.get_problem_detail(pid)
+                # 提取 Markdown 内容（不截图）
+                md_content = fetcher.extract_markdown_content()
+                return pid, detail, md_content, None
+
+            result = await asyncio.to_thread(_do_show)
+            pid = result[0]
+            detail = result[1]
+            md_content = result[2]
+
+            if pid is None:
+                await _send_text(result[3])  # 错误消息
+                return
+
+            diff_name = detail.get('difficulty_name', '暂无评定')
+            diff_emoji = {
+                '暂无评定': '⚪', '入门': '🔴', '普及−': '🟠',
+                '普及/提高−': '🟡', '普及+/提高': '🟢', '提高+/省选−': '🔵',
+                '省选/NOI−': '🟣', 'NOI/NOI+/CTSC': '⚫',
+            }.get(diff_name, '⬜')
+
+            # ── 第一条消息：题目摘要 ──
+            header = (
+                f'━━━ 题目详情 ━━━\n\n'
+                f'📌 {pid} {detail.get("title", "")}\n'
+                f'{diff_emoji} 难度：{diff_name}'
+            )
+            if detail.get('passed_rate'):
+                header += f'\n📊 通过率：{detail.get("passed_rate")}'
+            header += f'\n🔗 https://www.luogu.com.cn/problem/{pid}'
+            tags = detail.get('tags', [])
+            if tags:
+                header += f'\n🏷️ 标签：{"、".join(tags[:8])}'
+            await _send_text(header)
+
+            # ── 第二条消息：Markdown 题面 + 点击指令 ──
+            # 保存当前 PID 和 Markdown 到 state，供「看图」指令使用
+            state['current_pid'] = pid
+            state['current_md'] = md_content
+            state['showed_md'] = True  # 标记已发送 Markdown，等待看图指令
+
+            # 截断过长的 Markdown
+            display_md = md_content[:2000] if md_content else '（题目内容为空）'
+            if len(md_content) > 2000:
+                display_md += '\n\n...（内容过长，已截断）'
+
+            md_msg = (
+                f'📄 题目内容（Markdown）：\n\n'
+                f'```\n{display_md}\n```\n\n'
+                f'─────────────────────\n'
+                f'💡 输入「看图」或「截图」查看渲染后的题面图片'
+            )
+            await _send_text(md_msg)
+
+            # ── Footer ──
+            footer = (
+                f'\n─────────────────────\n'
+                f'继续「random」随机下一题\n'
+                f'「back」返回重新选题\n'
+                f'「quit」退出'
+            )
+            await _send_text(footer)
+
+            # 切换到 waiting_md 状态，等待用户输入「看图」指令
+            step[0] = 'waiting_md'
+
+        except Exception as e:
+            logger.error(f'[Luogu jump] 展示题目异常: {traceback.format_exc()}')
+            await _send_text(f'❌ 展示题目出错：{e}')
+
+    async def _render_and_send_screenshot():
+        """
+        渲染 Markdown 为图片并发送。
+        使用题目的 HTML 内容直接截图。
+        """
+        nonlocal fetcher
+        try:
+            pid = state.get('current_pid')
+            if not pid:
+                await _send_text('❌ 没有可渲染的题目')
+                return
+
+            def _do_screenshot():
+                # 重新访问题目页面并截图
+                fetcher.page.goto(f'https://www.luogu.com.cn/problem/{pid}', timeout=20000)
+                fetcher.page.wait_for_load_state('domcontentloaded', timeout=15000)
+                import time as _time; _time.sleep(1.5)
+                img_bytes = fetcher.screenshot_problem(pid)
+                return img_bytes
+
+            img_bytes = await asyncio.to_thread(_do_screenshot)
+            img_path = _ensure_image_path(img_bytes) if img_bytes else None
+
+            if img_path:
+                await _send_text('🖼️ 正在渲染题面图片...')
+                await _send_img(img_path)
+            else:
+                await _send_text('❌ 截图失败')
+
+        except Exception as e:
+            logger.error(f'[Luogu jump] 渲染截图异常: {traceback.format_exc()}')
+            await _send_text(f'❌ 渲染截图出错：{e}')
+
+    @session_waiter(timeout=180, record_history_chains=False)
+    async def jump_waiter(controller: SessionController, ev: AstrMessageEvent):
+        nonlocal state
+        text = ev.message_str.strip()
+        lower = text.lower()
+        s = step[0]
+
+        # ── 全局命令 ──────────────────────────────────────────────
+        if lower in ('quit', '退出', 'exit', 'q', '算了'):
+            await _send_text('✅ 已退出题库跳转，下次见！')
+            controller.stop()
+            return
+
+        if lower in ('help', '帮助', '?'):
+            await _send_text(
+                "📖 题库跳转帮助：\n\n"
+                "  数字 0-8   → 选择难度\n"
+                "  +标签      → 添加标签（支持模糊匹配）\n"
+                "  -标签      → 移除标签\n"
+                "  done       → 确认标签，进入下一步\n"
+                "  skip       → 跳过当前步骤\n"
+                "  random     → 随机选题\n"
+                "  看图/截图  → 渲染题目图片（显示题面）\n"
+                "  back       → 返回上一步\n"
+                "  quit       → 退出"
+            )
+            controller.keep(timeout=180, reset_timeout=True)
+            return
+
+        # ══════════════════════════════════════════════════════════
+        # Step 1：难度选择
+        # ══════════════════════════════════════════════════════════
+        if s == 'difficulty':
+            if lower in ('help', '?'):
+                await _send_text(_JUMP_STEP_TEXT['difficulty'])
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            if text.isdigit():
+                d = int(text)
+                if 0 <= d <= 8:
+                    state['difficulty'] = d if d > 0 else None
+                    diff_name = DIFFICULTY_NAMES[d] if d > 0 else '不限'
+                    await _send_text(f'✅ 已选择难度：{diff_name}')
+                    step[0] = 'tags'
+                    await _show_current_step()
+                    controller.keep(timeout=180, reset_timeout=True)
+                    return
+
+            await _send_text('❓ 请输入数字 0-8 选择难度')
+            controller.keep(timeout=180, reset_timeout=True)
+            return
+
+        # ══════════════════════════════════════════════════════════
+        # Step 2：标签筛选（多轮）
+        # ══════════════════════════════════════════════════════════
+        if s == 'tags':
+            if lower == 'done':
+                step[0] = 'keyword'
+                await _show_current_step()
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            if lower in ('skip', '跳过'):
+                step[0] = 'keyword'
+                await _show_current_step()
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            # +标签
+            if text.startswith('+'):
+                tag_name = text[1:].strip()
+                if not tag_name:
+                    await _send_text('❓ 请输入标签名，如 +动规')
+                    controller.keep(timeout=180, reset_timeout=True)
+                    return
+
+                matched = fuzzy_match_tag(tag_name)
+                if matched:
+                    tag_full = matched[0]
+                    if tag_full in state['tags']:
+                        await _send_text(f'「{tag_full}」已在已选列表中')
+                    else:
+                        state['tags'].append(tag_full)
+                        await _send_text(f'✅ 已添加：「{tag_full}」')
+                else:
+                    if tag_name in state['tags']:
+                        await _send_text(f'「{tag_name}」已在已选列表中')
+                    else:
+                        state['tags'].append(tag_name)
+                        await _send_text(f'✅ 已添加：「{tag_name}」（未匹配到精确标签）')
+
+                await _send_text(f'当前已选标签：{_jump_tags_str(state)}')
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            # -标签
+            if text.startswith('-'):
+                tag_name = text[1:].strip()
+                if tag_name in state['tags']:
+                    state['tags'].remove(tag_name)
+                    await _send_text(f'✅ 已移除：「{tag_name}」')
+                else:
+                    await _send_text(f'「{tag_name}」不在已选列表中')
+                await _send_text(f'当前已选标签：{_jump_tags_str(state)}')
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            if lower in ('list', '状态', '当前'):
+                await _send_text(_JUMP_STEP_TEXT['tags'].format(
+                    current_tags=_jump_tags_str(state) or '（无）'
+                ))
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            await _send_text(
+                f'❓ 无法理解输入\n'
+                f'当前已选标签：{_jump_tags_str(state)}\n\n'
+                f'输入 +标签 添加，-标签 移除，done 确认'
+            )
+            controller.keep(timeout=180, reset_timeout=True)
+            return
+
+        # ══════════════════════════════════════════════════════════
+        # Step 3：关键词（可选）
+        # ══════════════════════════════════════════════════════════
+        if s == 'keyword':
+            if lower in ('skip', '跳过', '无'):
+                state['keyword'] = None
+                await _send_text('✅ 跳过关键词筛选')
+            elif text:
+                state['keyword'] = text
+                await _send_text(f'✅ 已设置关键词：「{text}」')
+            else:
+                state['keyword'] = None
+                await _send_text('✅ 未输入关键词，跳过')
+
+            await _send_text('🔍 正在应用筛选条件，请稍候...')
+            ok = await _apply_filters()
+            if not ok:
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            if state['total'] == 0:
+                await _send_text(
+                    f'🔍 未找到符合条件的题目\n'
+                    f'难度：{_jump_diff_str(state)} | 标签：{_jump_tags_str(state)}\n\n'
+                    f'输入 back-tags 返回修改标签\n'
+                    f'输入 back-diff 重新开始所有筛选\n'
+                    f'输入 quit 退出'
+                )
+                step[0] = 'result'
+            else:
+                step[0] = 'result'
+                await _show_current_step()
+            controller.keep(timeout=180, reset_timeout=True)
+            return
+
+        # ══════════════════════════════════════════════════════════
+        # Step 4：选题
+        # ══════════════════════════════════════════════════════════
+        if s == 'result':
+            if state['total'] == 0:
+                if lower == 'back-diff':
+                    state['difficulty'] = None
+                    state['tags'] = []
+                    state['keyword'] = None
+                    state['total'] = 0
+                    step[0] = 'difficulty'
+                    await _send_text('← 重置所有条件，返回难度筛选步骤')
+                    await _send_text(_JUMP_STEP_TEXT['difficulty'])
+                    controller.keep(timeout=180, reset_timeout=True)
+                    return
+                await _send_text('输入 back-diff 重新开始，quit 退出')
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            if lower in ('random', 'r', '随机', 'rand'):
+                import random as _rand
+                pos = _rand.randint(1, state['total'])
+                await _send_text(f'🎲 随机选题（第 {pos} / {state["total"]}）')
+                await _show_problem(pos)
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            if lower == 'back-diff':
+                state['difficulty'] = None
+                state['tags'] = []
+                state['keyword'] = None
+                state['total'] = 0
+                step[0] = 'difficulty'
+                await _send_text('← 重置所有条件，返回难度筛选步骤')
+                await _send_text(_JUMP_STEP_TEXT['difficulty'])
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            if lower in ('back-tags', 'back-keyword', 'back'):
+                state['keyword'] = None
+                state['total'] = 0
+                step[0] = 'keyword'
+                await _send_text('← 返回关键词筛选步骤（保留难度和标签）')
+                await _show_current_step()
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            if text.isdigit():
+                pos = int(text)
+                if 1 <= pos <= state['total']:
+                    await _show_problem(pos)
+                    controller.keep(timeout=180, reset_timeout=True)
+                    return
+                else:
+                    await _send_text(f'⚠️ 序号超出范围，请输入 1-{state["total"]}')
+                    controller.keep(timeout=180, reset_timeout=True)
+                    return
+
+            await _show_current_step()
+            controller.keep(timeout=180, reset_timeout=True)
+            return
+
+        # ══════════════════════════════════════════════════════════
+        # waiting_md 状态：等待用户输入「看图」指令
+        # ══════════════════════════════════════════════════════════
+        if s == 'waiting_md':
+            # 「看图」或「截图」指令 - 渲染并发送图片
+            if lower in ('看图', '截图', 'render', 'img', 'image', '图片', 'screenshot'):
+                await _send_text('🖼️ 正在渲染题面图片，请稍候...')
+                await _render_and_send_screenshot()
+                step[0] = 'result'
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            # 继续随机下一题
+            if lower in ('random', 'r', '随机', 'rand'):
+                import random as _rand
+                pos = _rand.randint(1, state['total'])
+                await _send_text(f'🎲 随机选题（第 {pos} / {state["total"]}）')
+                await _show_problem(pos)
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            # 返回选题
+            if lower in ('back', 'back-tags', 'back-keyword'):
+                state['keyword'] = None
+                state['total'] = 0
+                state['showed_md'] = False
+                step[0] = 'keyword'
+                await _send_text('← 返回关键词筛选步骤（保留难度和标签）')
+                await _show_current_step()
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            if lower == 'back-diff':
+                state['difficulty'] = None
+                state['tags'] = []
+                state['keyword'] = None
+                state['total'] = 0
+                state['showed_md'] = False
+                step[0] = 'difficulty'
+                await _send_text('← 重置所有条件，返回难度筛选步骤')
+                await _send_text(_JUMP_STEP_TEXT['difficulty'])
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            if lower in ('quit', '退出', 'exit', 'q', '算了'):
+                await _send_text('✅ 已退出题库跳转，下次见！')
+                controller.stop()
+                return
+
+            # 其他输入 - 切换回 result 状态继续处理
+            step[0] = 'result'
+            controller.keep(timeout=180, reset_timeout=True)
+            return
+
+    try:
+        await _send_text(_JUMP_STEP_TEXT['difficulty'])
+        await jump_waiter(event)
+    except TimeoutError:
+        yield event.plain_result('⏰ 会话超时（3分钟无操作），已退出题库跳转')
+    except Exception as e:
+        logger.error(f'[Luogu jump] 会话异常: {traceback.format_exc()}')
+        yield event.plain_result(f'❌ 会话异常：{e}')
+    finally:
+        # 清理：关闭 ProblemFetcher（释放浏览器资源）
+        if fetcher is not None:
+            try:
+                fetcher.close()
+                logger.info('[Luogu jump] ProblemFetcher 已关闭')
+            except Exception:
+                pass
+
+
 HELP_TEXT = """洛谷助手指令：
 
 /luogu bind <手机号> <密码>
@@ -541,6 +1321,10 @@ HELP_TEXT = """洛谷助手指令：
 
 /luogu practice
   练习情况（按难度分类）
+
+/luogu jump
+  题库跳转，按难度/标签筛选后随机或指定题目
+  支持多轮对话，可持续选题
 
 /luogu help
   显示本帮助"""
@@ -710,6 +1494,15 @@ if _ASTRBOT:
                 except Exception as e:
                     logger.error(f'[Luogu] elo error: {traceback.format_exc()}')
                     yield event.plain_result(f"❌ 生成趋势图出错：{e}")
+                return
+
+            if sub == 'jump':
+                logger.info(f'[Luogu] 用户 {qq_id} 请求题库跳转')
+                if not Path(cfile).exists():
+                    yield event.plain_result("请先用 /luogu bind 绑定账号")
+                    return
+                async for result in _jump_session_flow(event, cfile):
+                    yield result
                 return
 
             if sub == 'practice':
