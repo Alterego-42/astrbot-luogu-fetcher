@@ -915,41 +915,51 @@ class ProblemFetcher:
     def _try_click_copy_markdown_button(self) -> Optional[str]:
         """点击页面上的「复制 Markdown」按钮"""
         try:
-            # 查找复制按钮 - 可能的位置：
-            # 1. 题目详情页顶部工具栏
-            # 2. 题目内容区域附近
+            # 实际测试发现：
+            # 1. 按钮是 <a> 标签，不是 <button>
+            # 2. 文本是 "复制 Markdown"（有空格）
+            # 3. 点击后无法直接读取剪贴板（浏览器权限限制）
+            # 4. 需要从页面元素提取 Markdown 内容
+
+            # 方法1: 用 JS 点击按钮，然后从页面提取 Markdown
+            click_result = self.page.evaluate("""
+                () => {
+                    const btn = Array.from(document.querySelectorAll('a')).find(a => a.textContent.includes('复制 Markdown'));
+                    if (btn) {
+                        btn.click();
+                        return 'clicked';
+                    }
+                    return 'not found';
+                }
+            """)
+            if click_result == 'clicked':
+                time.sleep(0.3)
+                # 从页面元素提取 Markdown 内容
+                md_content = self._extract_markdown_from_page()
+                if md_content and len(md_content) > 20:
+                    return md_content
+
+            # 方法2: 尝试 Playwright locator 方式（备用）
             copy_selectors = [
-                'button:has-text("复制Markdown")',
-                'button:has-text("复制 Markdown")',
-                'button:has-text("复制markdown")',
-                '.copy-markdown-btn',
-                '[class*="copy-markdown"]',
-                'button[title*="Markdown"]',
-                'button[title*="复制"]',
+                'a:has-text("复制Markdown")',
+                'a:has-text("复制 Markdown")',
+                'a:has-text("复制markdown")',
+                'a[href*="javascript"]',
             ]
 
             for selector in copy_selectors:
                 try:
-                    btn = self.page.locator(selector).first
+                    btn = self.page.locator(selector).filter(has_text=re.compile(r'复制\s*Markdown?', re.I)).first
                     if btn.count() > 0:
                         btn.click()
-                        time.sleep(0.5)
-                        # 尝试从剪贴板读取（Playwright 不支持直接读剪贴板，改用 JS）
-                        clipboard_content = self.page.evaluate("""
-                            async () => {
-                                try {
-                                    return await navigator.clipboard.readText();
-                                } catch(e) {
-                                    return null;
-                                }
-                            }
-                        """)
-                        if clipboard_content and len(clipboard_content) > 20:
-                            return clipboard_content
+                        time.sleep(0.3)
+                        md_content = self._extract_markdown_from_page()
+                        if md_content and len(md_content) > 20:
+                            return md_content
                 except Exception:
                     continue
 
-            # 备选：直接从页面元素提取 Markdown 格式内容
+            # 备选：直接提取页面 Markdown 内容
             return self._extract_markdown_from_page()
         except Exception as e:
             logger.warning(f'[Luogu] 复制按钮点击失败: {e}')
