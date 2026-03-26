@@ -912,6 +912,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
     """
     import astrbot.api.message_components as Comp
     _cookies = cookies_file
+    qq_id = str(event.get_sender_id())
 
     # --- 检测 cookie 是否有效 ---
     logger.info(f'[Luogu jump] 检测 cookie 有效性: {cookies_file}')
