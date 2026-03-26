@@ -23,6 +23,7 @@ import json
 import time
 import asyncio
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -786,11 +787,24 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
     状态流转：
       difficulty → tags → keyword → result → [选题] → result
 
-    关键设计：使用单一 ProblemFetcher 实例贯穿整个会话，
-    避免每次操作创建新实例导致 page 状态丢失。
+    关键设计：
+    - 单一 ProblemFetcher 实例贯穿整个会话
+    - 专用单线程 ThreadPoolExecutor：所有 Playwright Sync API 调用
+      必须在同一线程中执行，asyncio.to_thread() 每次分配不同线程
+      会导致 "Cannot switch to a different thread" 的 greenlet 报错。
+      解决方案：创建 max_workers=1 的专用 executor，所有 Playwright
+      操作通过 loop.run_in_executor(executor, fn) 提交到固定线程。
     """
     import astrbot.api.message_components as Comp
     _cookies = cookies_file
+
+    # --- 专用单线程 executor（所有 Playwright 操作必须在同一线程） ---
+    _pw_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='pw_jump')
+
+    async def _run_in_pw(fn):
+        """在专用 Playwright 线程中执行同步函数。"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_pw_executor, fn)
 
     # --- 状态初始化 ---
     state = {
@@ -839,12 +853,11 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
     async def _apply_filters() -> bool:
         nonlocal fetcher
         try:
-            # 使用单一实例（setup() 必须在 to_thread 中执行）
+            # 使用单一实例（所有 Playwright 操作必须在同一线程）
             if fetcher is None:
                 fetcher = ProblemFetcher(_cookies)
-                await asyncio.to_thread(fetcher.setup)
+                await _run_in_pw(fetcher.setup)
             else:
-                # 复用已有实例，确保 page 有效
                 logger.info('[Luogu jump] 复用已有 ProblemFetcher 实例')
 
             def _do_apply():
@@ -856,7 +869,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                     keyword=state['keyword'] if state['keyword'] else None,
                 )
 
-            r = await asyncio.to_thread(_do_apply)
+            r = await _run_in_pw(_do_apply)
             if not r.get('success'):
                 await _send_text(f'❌ 筛选失败：{r.get("message", "未知错误")}')
                 return False
@@ -882,17 +895,17 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
         """
         nonlocal fetcher
         try:
-            # 使用同一实例（setup() 必须在 to_thread 中执行）
+            # 使用同一实例（所有 Playwright 操作必须在同一线程）
             if fetcher is None:
                 fetcher = ProblemFetcher(_cookies)
-                await asyncio.to_thread(fetcher.setup)
+                await _run_in_pw(fetcher.setup)
                 # 恢复题库列表页
                 if state.get('list_url'):
                     def _goto_list():
                         fetcher.page.goto(state['list_url'], timeout=20000)
                         fetcher.page.wait_for_load_state('domcontentloaded', timeout=15000)
                         import time as _time; _time.sleep(1.5)
-                    await asyncio.to_thread(_goto_list)
+                    await _run_in_pw(_goto_list)
 
             def _do_show():
                 if position:
@@ -911,7 +924,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                 md_content = fetcher.extract_markdown_content()
                 return pid, detail, md_content, None
 
-            result = await asyncio.to_thread(_do_show)
+            result = await _run_in_pw(_do_show)
             pid = result[0]
             detail = result[1]
             md_content = result[2]
@@ -996,7 +1009,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                 img_bytes = fetcher.screenshot_problem(pid)
                 return img_bytes
 
-            img_bytes = await asyncio.to_thread(_do_screenshot)
+            img_bytes = await _run_in_pw(_do_screenshot)
             img_path = _ensure_image_path(img_bytes) if img_bytes else None
 
             if img_path:
@@ -1295,10 +1308,12 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
         # 清理：关闭 ProblemFetcher（释放浏览器资源）
         if fetcher is not None:
             try:
-                await asyncio.to_thread(fetcher.close)
+                await _run_in_pw(fetcher.close)
                 logger.info('[Luogu jump] ProblemFetcher 已关闭')
             except Exception:
                 pass
+        # 关闭专用 executor
+        _pw_executor.shutdown(wait=False)
 
 
 HELP_TEXT = """洛谷助手指令：
