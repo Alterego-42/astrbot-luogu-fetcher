@@ -221,11 +221,10 @@ async def _run_async(cookies_file: str, qq_id: str, task_fn, **kwargs) -> Any:
 
 def _check_cookie_valid(cookies_file: str) -> bool:
     """
-    检测 cookie 是否有效。
-    通过调用洛谷 API 检查是否返回登录用户数据。
+    检测 cookie 是否有效（使用 Playwright 模拟浏览器访问）。
     返回 True 表示有效，False 表示已过期。
     """
-    import requests
+    from playwright.sync_api import sync_playwright
 
     if not Path(cookies_file).exists():
         return False
@@ -234,43 +233,40 @@ def _check_cookie_valid(cookies_file: str) -> bool:
         with open(cookies_file, 'r', encoding='utf-8') as f:
             cookie_data = json.load(f)
 
-        # 转换为 requests 格式
-        cookies = {}
-        for c in cookie_data.get('cookies', []):
-            cookies[c['name']] = c['value']
-
+        cookies = cookie_data.get('cookies', [])
         if not cookies:
             return False
 
-        # 调用 API 检测 - 使用正确的验证登录状态 API
-        for api_url in [
-            'https://www.luogu.com.cn/fe/api/user/current',
-            'https://www.luogu.com.cn/api/user/currentUser',
-        ]:
+        # 使用 Playwright 检测登录状态
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            context = browser.new_context()
+            context.add_cookies(cookies)
+            page = context.new_page()
+
             try:
-                resp = requests.get(
-                    api_url,
-                    cookies=cookies,
-                    headers={
-                        'Accept': 'application/json',
-                        'Referer': 'https://www.luogu.com.cn/',
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    },
-                    timeout=10
-                )
-                if resp.status_code != 200:
-                    continue
-                data = resp.json()
-                # 检查是否有 currentUser 或 user 数据
-                current_user = data.get('currentUser') or data.get('user')
-                if current_user:
-                    uid = current_user.get('uid') if isinstance(current_user, dict) else current_user
-                    logger.info(f'[Luogu] Cookie 检测成功, uid={uid}')
+                page.goto('https://www.luogu.com.cn/', timeout=15000, wait_until='networkidle')
+                time.sleep(1)
+
+                # 检查页面是否包含用户信息（登录状态）
+                content = page.content()
+                if '__NEXT_DATA__' in content or 'window.__INITIAL_STATE__' in content:
+                    logger.info('[Luogu] Cookie 检测成功（Playwright）')
                     return True
-            except Exception as e:
-                logger.warning(f'[Luogu] Cookie 检测 API {api_url} 失败: {e}')
-                continue
-        logger.warning('[Luogu] Cookie 检测失败: 所有 API 都无法验证')
+
+                # 备用：检查页面是否有登录后的元素
+                if page.is_visible('.user-nav'):
+                    logger.info('[Luogu] Cookie 检测成功（发现 .user-nav）')
+                    return True
+
+                logger.warning('[Luogu] Cookie 检测失败：未检测到登录状态')
+                return False
+            finally:
+                page.close()
+                context.close()
+                browser.close()
+    except Exception as e:
+        logger.warning(f'[Luogu] Cookie 检测异常: {e}')
         return False
     except Exception as e:
         logger.warning(f'[Luogu] Cookie 检测失败: {e}')
