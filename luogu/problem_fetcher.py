@@ -23,7 +23,7 @@ except ImportError:
     logger = logging.getLogger('luogu_plugin')
     from playwright.sync_api import sync_playwright, Page
 
-from luogu.tags import DIFFICULTY_NAMES, fuzzy_match_tag, KNOWN_TAG_IDS
+from luogu.tags import DIFFICULTY_NAMES, KNOWN_TAG_IDS
 
 
 class ProblemFetcher:
@@ -161,11 +161,25 @@ class ProblemFetcher:
             time.sleep(1.5)
 
             # 2. 应用剩余标签筛选（UI 交互，未找到 ID 的标签）
+            selected_tag_map: Dict[str, str] = {}
+            missing_tags: List[str] = []
             if tags_to_select_ui:
                 logger.info(f'[Luogu] 剩余标签 UI 筛选: {tags_to_select_ui}')
-                if not self._select_tags(tags_to_select_ui):
-                    logger.warning(f'[Luogu] 标签筛选失败')
-                    return {'success': False, 'message': f'标签不存在: {tags_to_select_ui}', 'list_url': list_url}
+                selection = self._select_tags(tags_to_select_ui)
+                missing_tags = selection.get('missing', [])
+                selected_tag_map = {
+                    item['requested']: item['matched']
+                    for item in selection.get('selected', [])
+                }
+                if missing_tags and not tag_ids and not selected_tag_map:
+                    logger.warning('[Luogu] 标签筛选失败：所有待选标签都不存在')
+                    return {
+                        'success': False,
+                        'message': f'标签不存在: {missing_tags}',
+                        'list_url': list_url,
+                        'missing_tags': missing_tags,
+                        'applied_tags': [],
+                    }
                 time.sleep(2)
                 # 标签筛选后页面已更新，更新 list_url
                 list_url = self.page.url
@@ -174,8 +188,16 @@ class ProblemFetcher:
             # 3. 获取筛选结果统计（动态检测 page_size）
             result = self._get_filter_result()
             logger.info(f'[Luogu] 筛选结果: 共 {result.get("total", 0)} 题，{result.get("total_pages", 0)} 页，每页{result.get("page_size_detected", "?")}题')
+            applied_tags: List[str] = []
+            for tag in tags or []:
+                if tag in KNOWN_TAG_IDS:
+                    applied_tags.append(tag)
+                elif tag in selected_tag_map:
+                    applied_tags.append(selected_tag_map[tag])
             result['success'] = True
             result['list_url'] = list_url
+            result['missing_tags'] = missing_tags
+            result['applied_tags'] = applied_tags
             return result
 
         except Exception as e:
@@ -477,7 +499,7 @@ class ProblemFetcher:
             logger.warning(f'[Luogu] 选择难度失败: {e}')
             return False
 
-    def _select_tags(self, tags: List[str]) -> bool:
+    def _select_tags(self, tags: List[str]) -> Dict[str, Any]:
         """
         选择标签（支持多 Tab：算法/来源/时间/区域/特殊题目）。
 
@@ -498,7 +520,7 @@ class ProblemFetcher:
                 time.sleep(1.5)  # 等待弹窗出现
             else:
                 logger.warning('[Luogu] 未找到标签筛选按钮')
-                return False
+                return {'selected': [], 'missing': tags[:]}
 
             # 2. 找到标签选择弹窗（.modal，包含"选择标签"文本）
             tag_modal = None
@@ -525,18 +547,21 @@ class ProblemFetcher:
 
             if not tag_modal:
                 logger.warning('[Luogu] 未找到标签选择弹窗')
-                return False
+                return {'selected': [], 'missing': tags[:]}
 
             logger.info('[Luogu] 已打开标签选择弹窗')
 
             # 3. 对每个标签，尝试在当前及所有 Tab 中查找
+            selected = []
+            missing = []
             for tag in tags:
-                found = self._find_and_click_tag_in_modal(tag_modal, tag)
+                matched_text = self._find_and_click_tag_in_modal(tag_modal, tag)
 
-                if not found:
+                if not matched_text:
                     logger.warning(f'[Luogu] 标签不存在（所有 Tab 已搜索）: {tag}')
-                    self._close_tag_modal()
-                    return False
+                    missing.append(tag)
+                    continue
+                selected.append({'requested': tag, 'matched': matched_text})
 
             # 4. 点击确认按钮（在 modal 的 l-card 内）
             confirm_btn = tag_modal.locator('button.solid:has-text("确认")')
@@ -553,14 +578,14 @@ class ProblemFetcher:
                 self.page.keyboard.press('Enter')
                 time.sleep(1.5)
 
-            return True
+            return {'selected': selected, 'missing': missing}
 
         except Exception as e:
             logger.warning(f'[Luogu] 选择标签失败: {e}')
             self._close_tag_modal()
-            return False
+            return {'selected': [], 'missing': tags[:]}
 
-    def _find_and_click_tag_in_modal(self, tag_modal, tag: str) -> bool:
+    def _find_and_click_tag_in_modal(self, tag_modal, tag: str) -> Optional[str]:
         """
         在弹窗中查找并点击指定标签，必要时切换 Tab。
 
@@ -572,13 +597,14 @@ class ProblemFetcher:
         3. 如果未找到，切换 Tab 后重试
         """
         # Step 1: 先在当前已显示的 .toggle-tag 中查找
-        if self._try_click_tag(tag_modal, tag):
-            return True
+        direct_match = self._try_click_tag(tag_modal, tag)
+        if direct_match:
+            return direct_match
 
         # Step 2: 用 JS 在 modal 内搜索标签
-        found = self._js_find_and_click_tag_in_modal(tag)
-        if found:
-            return True
+        js_match = self._js_find_and_click_tag_in_modal(tag)
+        if js_match:
+            return js_match
 
         # Step 3: 仍未找到 → 切换 Tab 后重试
         # Tab 是 .modal .entry 元素（span.entry）
@@ -593,7 +619,7 @@ class ProblemFetcher:
         
         if not tab_entries:
             logger.warning('[Luogu] 未找到任何 Tab 按钮')
-            return False
+            return None
 
         logger.info(f'[Luogu] 弹窗 Tab 列表: {tab_entries}')
 
@@ -621,23 +647,25 @@ class ProblemFetcher:
             if clicked:
                 time.sleep(0.8)
                 # 在当前 Tab 中查找标签
-                if self._try_click_tag(tag_modal, tag):
-                    return True
-                if self._js_find_and_click_tag_in_modal(tag):
-                    return True
+                direct_match = self._try_click_tag(tag_modal, tag)
+                if direct_match:
+                    return direct_match
+                js_match = self._js_find_and_click_tag_in_modal(tag)
+                if js_match:
+                    return js_match
 
-        return False
+        return None
 
-    def _js_find_and_click_tag_in_modal(self, tag: str) -> bool:
+    def _js_find_and_click_tag_in_modal(self, tag: str) -> Optional[str]:
         """
         用 JS 在 modal 内搜索并点击标签元素。
         """
         for strategy in ('exact', 'fuzzy'):
             try:
-                found = self.page.evaluate(f"""
+                match_text = self.page.evaluate(f"""
                     () => {{
                         const modal = document.querySelector('.modal');
-                        if (!modal) return false;
+                        if (!modal) return null;
                         const tags = modal.querySelectorAll('.toggle-tag');
                         for (const el of tags) {{
                             const text = (el.innerText || '').trim();
@@ -649,21 +677,23 @@ class ProblemFetcher:
                             }}
                             if (match) {{
                                 el.click();
-                                return true;
+                                return text;
                             }}
                         }}
-                        return false;
+                        return null;
                     }}
                 """)
-                if found:
-                    logger.info(f'[Luogu] JS {"精确" if strategy == "exact" else "模糊"}匹配点击标签: {tag}')
+                if match_text:
+                    logger.info(
+                        f'[Luogu] JS {"精确" if strategy == "exact" else "模糊"}匹配点击标签: {match_text}'
+                    )
                     time.sleep(0.3)
-                    return True
+                    return str(match_text)
             except Exception as e:
                 logger.debug(f'[Luogu] JS 查找标签（第{strategy}策略）失败: {e}')
-        return False
+        return None
 
-    def _try_click_tag(self, tag_modal, tag: str) -> bool:
+    def _try_click_tag(self, tag_modal, tag: str) -> Optional[str]:
         """在 tag_modal 中查找并点击 .toggle-tag，返回是否成功"""
         all_toggle_tags = tag_modal.locator('.toggle-tag')
         for el in all_toggle_tags.all():
@@ -673,10 +703,10 @@ class ProblemFetcher:
                     el.click(force=True)
                     time.sleep(0.3)
                     logger.info(f'[Luogu] 已选中标签: {el_text}')
-                    return True
+                    return el_text
             except:
                 pass
-        return False
+        return None
 
 
 

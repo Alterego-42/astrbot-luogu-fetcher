@@ -21,6 +21,7 @@ import sys
 import re
 import json
 import time
+import difflib
 import asyncio
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -936,8 +937,80 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
         s = step[0]
         await _send_text(render_jump_step(s, state))
 
+    def _normalize_tag_input(tag_name: str) -> Tuple[str, bool]:
+        matched = fuzzy_match_tag(tag_name)
+        if matched:
+            return matched[0], True
+        return tag_name.strip(), False
+
+    def _resolve_selected_tag(tag_name: str) -> Optional[str]:
+        raw = tag_name.strip()
+        if not raw:
+            return None
+        if raw in state['tags']:
+            return raw
+
+        matched = fuzzy_match_tag(raw)
+        for candidate in matched:
+            if candidate in state['tags']:
+                return candidate
+
+        lowered = raw.lower()
+        for current in state['tags']:
+            current_lower = current.lower()
+            if lowered == current_lower or lowered in current_lower or current_lower in lowered:
+                return current
+        return None
+
+    def _looks_like_commandish_input(text: str) -> bool:
+        raw = text.strip()
+        if not raw:
+            return False
+        if raw.isdigit() or raw.startswith(('+', '-')):
+            return True
+
+        compact = re.sub(r'[\s_-]+', '', raw.lower())
+        explicit_tokens = {
+            'done', 'skip', 'random', 'rand', 'back', 'backdiff',
+            'backtags', 'backkeyword', 'quit', 'exit', 'help',
+            'render', 'img', 'image', 'screenshot',
+            '看图', '截图', '图片', '帮助', '退出', '随机',
+        }
+        if compact in explicit_tokens:
+            return True
+        if re.fullmatch(r'[a-z0-9]+', compact):
+            return True
+        return bool(
+            difflib.get_close_matches(
+                compact,
+                [token for token in explicit_tokens if re.fullmatch(r'[a-z0-9]+', token)],
+                n=1,
+                cutoff=0.75,
+            )
+        )
+
+    def _suggest_step_command(text: str, commands: Tuple[str, ...]) -> Optional[str]:
+        compact = re.sub(r'[\s_-]+', '', text.strip().lower())
+        if not compact:
+            return None
+        matches = difflib.get_close_matches(
+            compact,
+            [command.replace('-', '') for command in commands],
+            n=1,
+            cutoff=0.75,
+        )
+        if not matches:
+            return None
+        normalized = matches[0]
+        for command in commands:
+            if command.replace('-', '') == normalized:
+                return command
+        return None
+
     async def _parse_natural_language_intent(text: str) -> Optional[Dict[str, Any]]:
         if not context or not text.strip():
+            return None
+        if _looks_like_commandish_input(text):
             return None
         intent = await parse_jump_natural_language(context, event, text, HOT_TAGS)
         if intent:
@@ -1092,6 +1165,15 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
             if not r.get('success'):
                 await _send_text(f'❌ 筛选失败：{r.get("message", "未知错误")}')
                 return False
+            missing_tags = r.get('missing_tags') or []
+            applied_tags = r.get('applied_tags')
+            if applied_tags is not None:
+                state['tags'] = applied_tags
+            if missing_tags:
+                await _send_text(
+                    '⚠️ 以下标签未找到，已自动忽略：'
+                    + '、'.join(missing_tags)
+                )
             state['total'] = r.get('total', 0)
             state['list_url'] = r.get('list_url')
             state['page_size'] = r.get('page_size_detected', 50)
@@ -1328,9 +1410,8 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
                     controller.keep(timeout=180, reset_timeout=True)
                     return
 
-                matched = fuzzy_match_tag(tag_name)
+                tag_full, matched = _normalize_tag_input(tag_name)
                 if matched:
-                    tag_full = matched[0]
                     if tag_full in state['tags']:
                         await _send_text(f'「{tag_full}」已在已选列表中')
                     else:
@@ -1341,7 +1422,11 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
                         await _send_text(f'「{tag_name}」已在已选列表中')
                     else:
                         state['tags'].append(tag_name)
-                        await _send_text(f'✅ 已添加：「{tag_name}」（未匹配到精确标签）')
+                        await _send_text(
+                            f'📝 已暂存：「{tag_name}」\n'
+                            f'本地词表暂未命中，筛题时会到洛谷站内标签面板继续尝试；'
+                            f'若站内也不存在，我会提醒并忽略它。'
+                        )
 
                 await _send_text(render_selected_tags_update(state))
                 controller.keep(timeout=180, reset_timeout=True)
@@ -1350,9 +1435,10 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
             # -标签
             if text.startswith('-'):
                 tag_name = text[1:].strip()
-                if tag_name in state['tags']:
-                    state['tags'].remove(tag_name)
-                    await _send_text(f'✅ 已移除：「{tag_name}」')
+                resolved_tag = _resolve_selected_tag(tag_name)
+                if resolved_tag:
+                    state['tags'].remove(resolved_tag)
+                    await _send_text(f'✅ 已移除：「{resolved_tag}」')
                 else:
                     await _send_text(f'「{tag_name}」不在已选列表中')
                 await _send_text(render_selected_tags_update(state))
@@ -1367,6 +1453,15 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
             if await _handle_natural_language_intent(
                 controller, await _parse_natural_language_intent(text)
             ):
+                return
+
+            typo_command = _suggest_step_command(text, ('done', 'skip'))
+            if typo_command:
+                await _send_text(
+                    f'❓ 你是不是想输入 `{typo_command}`？\n'
+                    f'{render_selected_tags_update(state)}'
+                )
+                controller.keep(timeout=180, reset_timeout=True)
                 return
 
             await _send_text(
