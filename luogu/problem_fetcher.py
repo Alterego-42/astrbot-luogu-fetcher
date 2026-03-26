@@ -981,89 +981,79 @@ class ProblemFetcher:
         if not pid:
             return '（未能确定题目编号）'
 
-            # 通过 API 获取原始 Markdown
-            api_url = f'https://www.luogu.com.cn/problem/{pid}?_contentOnly=1'
-            logger.info(f'[Luogu] 通过 API 获取题目 Markdown: {api_url}')
+        # 通过 API 获取原始 Markdown
+        api_url = f'https://www.luogu.com.cn/problem/{pid}?_contentOnly=1'
+        logger.info(f'[Luogu] 通过 API 获取题目 Markdown: {api_url}')
 
-            # 使用绝对 URL 并添加必要的请求头
-            result = self.page.evaluate(f"""
-                async () => {{
-                    try {{
-                        const resp = await fetch('{api_url}', {{
-                            headers: {{
-                                'x-luogu-type': 'content-only',
-                                'accept': 'application/json',
-                                'referer': 'https://www.luogu.com.cn/problem/{pid}'
-                            }},
-                            credentials: 'include'
-                        }});
-                        const text = await resp.text();
-                        // 检查是否返回了 HTML（未登录或被拦截）
-                        if (!text.startsWith('{{')) {{
-                            return {{ error: '非JSON响应，可能未登录', raw: text.substring(0, 200) }};
-                        }}
-                        return JSON.parse(text);
-                    }} catch(e) {{
-                        return {{ error: e.toString() }};
+        # 使用绝对 URL 并添加必要的请求头
+        result = self.page.evaluate(f"""
+            async () => {{
+                try {{
+                    const resp = await fetch('{api_url}', {{
+                        headers: {{
+                            'x-luogu-type': 'content-only',
+                            'accept': 'application/json',
+                            'referer': 'https://www.luogu.com.cn/problem/{pid}'
+                        }},
+                        credentials: 'include'
+                    }});
+                    const text = await resp.text();
+                    // 检查是否返回了 HTML（未登录或被拦截）
+                    if (!text.startsWith('{{')) {{
+                        return {{ error: '非JSON响应，可能未登录', raw: text.substring(0, 200) }};
                     }}
+                    return JSON.parse(text);
+                }} catch(e) {{
+                    return {{ error: e.toString() }};
                 }}
-            """)
+            }}
+        """)
 
-            if isinstance(result, dict):
-                if result.get('error'):
-                    logger.warning(f'[Luogu] API 请求失败: {result["error"]}')
-                    return self._extract_markdown_fallback()
+        if isinstance(result, dict):
+            if result.get('error'):
+                logger.warning(f'[Luogu] API 请求失败: {result["error"]}')
+                return self._extract_markdown_fallback()
 
-                # 尝试从 JSON 中提取 Markdown
-                # 结构: result.currentData.problem.content (渲染后)
-                # 或:   result.currentData.problem.description (部分老接口)
-                # 洛谷实际 API 结构：result.currentData.problem.content
-                current_data = result.get('currentData', {})
-                problem_data = current_data.get('problem', {})
+            # 尝试从 JSON 中提取 Markdown
+            current_data = result.get('currentData', {})
+            problem_data = current_data.get('problem', {})
 
-                # content 字段通常是题目 Markdown 内容
-                content = problem_data.get('content', '')
-                if content and len(content) > 50:
-                    logger.info(f'[Luogu] 成功获取题目 Markdown，长度: {len(content)}')
-                    return content
+            content = problem_data.get('content', '')
+            if content and len(content) > 50:
+                logger.info(f'[Luogu] 成功获取题目 Markdown，长度: {len(content)}')
+                return content
 
-                # 备用字段
-                for field in ['description', 'body', 'statement']:
-                    val = problem_data.get(field, '')
-                    if val and len(val) > 50:
-                        logger.info(f'[Luogu] 通过字段 {field} 获取内容，长度: {len(val)}')
-                        return val
+            for field in ['description', 'body', 'statement']:
+                val = problem_data.get(field, '')
+                if val and len(val) > 50:
+                    logger.info(f'[Luogu] 通过字段 {field} 获取内容，长度: {len(val)}')
+                    return val
 
-                # 全量 dump 查找内容
-                logger.warning(f'[Luogu] API 返回结构异常，尝试全量提取')
-                raw_str = json.dumps(result, ensure_ascii=False)
-                if 'inputFormat' in raw_str or '输入格式' in raw_str or '输入描述' in raw_str:
-                    # 找最长的 Markdown 字段
-                    def _find_md(obj, depth=0):
-                        if depth > 10:
-                            return ''
-                        if isinstance(obj, str) and len(obj) > 100 and ('##' in obj or '\n\n' in obj or '输入' in obj):
-                            return obj
-                        if isinstance(obj, dict):
-                            for v in obj.values():
-                                r = _find_md(v, depth + 1)
-                                if r:
-                                    return r
-                        if isinstance(obj, list):
-                            for item in obj:
-                                r = _find_md(item, depth + 1)
-                                if r:
-                                    return r
+            # 全量 dump 查找内容
+            logger.warning(f'[Luogu] API 返回结构异常，尝试全量提取')
+            raw_str = json.dumps(result, ensure_ascii=False)
+            if 'inputFormat' in raw_str or '输入格式' in raw_str or '输入描述' in raw_str:
+                def _find_md(obj, depth=0):
+                    if depth > 10:
                         return ''
-                    found = _find_md(result)
-                    if found:
-                        return found
+                    if isinstance(obj, str) and len(obj) > 100 and ('##' in obj or '\n\n' in obj or '输入' in obj):
+                        return obj
+                    if isinstance(obj, dict):
+                        for v in obj.values():
+                            r = _find_md(v, depth + 1)
+                            if r:
+                                return r
+                    if isinstance(obj, list):
+                        for item in obj:
+                            r = _find_md(item, depth + 1)
+                            if r:
+                                return r
+                    return ''
+                found = _find_md(result)
+                if found:
+                    return found
 
-            return self._extract_markdown_fallback()
-
-        except Exception as e:
-            logger.warning(f'[Luogu] 获取 Markdown 内容失败: {e}')
-            return self._extract_markdown_fallback()
+        return self._extract_markdown_fallback()
 
     def _extract_markdown_fallback(self) -> str:
         """兜底：从当前页面 HTML 提取可读文本"""
