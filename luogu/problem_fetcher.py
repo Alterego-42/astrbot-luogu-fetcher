@@ -874,10 +874,11 @@ class ProblemFetcher:
 
     def extract_markdown_content(self, pid: str = None) -> str:
         """
-        通过洛谷 API 获取题目原始 Markdown 内容。
+        获取题目 Markdown 内容。
 
-        洛谷 API: GET /problem/{pid}?_contentOnly=1
-        返回 JSON，content.markdown.description 即为题面 Markdown。
+        优先方案：
+        1. 点击页面上的「复制 Markdown」按钮
+        2. 失败则尝试 API（需要登录态）
 
         Args:
             pid: 题目编号（如 P1047）。若为 None，则从当前页面 URL 提取。
@@ -886,13 +887,97 @@ class ProblemFetcher:
             题目的原始 Markdown 格式文本
         """
         try:
-            # 确定 PID
+            # 确保在题目页面
             if not pid:
                 current_url = self.page.url
                 pid_match = re.search(r'/problem/([Pp]?\w+)', current_url, re.IGNORECASE)
                 if pid_match:
                     pid = pid_match.group(1)
                     pid = 'P' + pid.lstrip('pP')
+
+            if not pid:
+                return '（未能确定题目编号）'
+
+            # 方案1：尝试点击「复制 Markdown」按钮
+            md_content = self._try_click_copy_markdown_button()
+            if md_content and len(md_content) > 20:
+                logger.info(f'[Luogu] 通过复制按钮获取 Markdown，长度: {len(md_content)}')
+                return md_content
+
+            # 方案2：尝试 API（需要登录态）
+            logger.info('[Luogu] 复制按钮失败，尝试 API')
+            return self._fetch_markdown_via_api(pid)
+
+        except Exception as e:
+            logger.error(f'[Luogu] 获取 Markdown 失败: {e}')
+            return f'（获取题目内容失败: {e}）'
+
+    def _try_click_copy_markdown_button(self) -> Optional[str]:
+        """点击页面上的「复制 Markdown」按钮"""
+        try:
+            # 查找复制按钮 - 可能的位置：
+            # 1. 题目详情页顶部工具栏
+            # 2. 题目内容区域附近
+            copy_selectors = [
+                'button:has-text("复制Markdown")',
+                'button:has-text("复制 Markdown")',
+                'button:has-text("复制markdown")',
+                '.copy-markdown-btn',
+                '[class*="copy-markdown"]',
+                'button[title*="Markdown"]',
+                'button[title*="复制"]',
+            ]
+
+            for selector in copy_selectors:
+                try:
+                    btn = self.page.locator(selector).first
+                    if btn.count() > 0:
+                        btn.click()
+                        time.sleep(0.5)
+                        # 尝试从剪贴板读取（Playwright 不支持直接读剪贴板，改用 JS）
+                        clipboard_content = self.page.evaluate("""
+                            async () => {
+                                try {
+                                    return await navigator.clipboard.readText();
+                                } catch(e) {
+                                    return null;
+                                }
+                            }
+                        """)
+                        if clipboard_content and len(clipboard_content) > 20:
+                            return clipboard_content
+                except Exception:
+                    continue
+
+            # 备选：直接从页面元素提取 Markdown 格式内容
+            return self._extract_markdown_from_page()
+        except Exception as e:
+            logger.warning(f'[Luogu] 复制按钮点击失败: {e}')
+            return None
+
+    def _extract_markdown_from_page(self) -> Optional[str]:
+        """从页面元素提取类似 Markdown 的内容"""
+        try:
+            md_content = self.page.evaluate("""
+                () => {
+                    // 尝试找 Markdown 源内容区域
+                    const mdEl = document.querySelector('.problem-markdown')
+                        || document.querySelector('[class*="markdown"]')
+                        || document.querySelector('.lg-markdown');
+                    if (mdEl) return mdEl.innerText;
+
+                    // 兜底：从题目内容提取
+                    const contentEl = document.querySelector('.problem-content')
+                        || document.querySelector('.lg-content');
+                    return contentEl ? contentEl.innerText : null;
+                }
+            """)
+            return md_content if md_content and len(md_content) > 20 else None
+        except Exception:
+            return None
+
+    def _fetch_markdown_via_api(self, pid: str) -> str:
+        """通过洛谷 API 获取 Markdown（需要登录态）"""
 
             if not pid:
                 return '（未能确定题目编号）'

@@ -713,7 +713,7 @@ def _build_problem_html(detail: dict) -> str:
 _JUMP_STEP_TEXT = {
     'difficulty': (
         "━━━ Step 1：难度筛选 ━━━\n\n"
-        "请选择题目难度（输入数字 0-7）：\n\n"
+        "请选择题目难度（输入数字 0-8）：\n\n"
         "  0. 跳过（不限难度）\n"
         "  1. 暂无评定\n"
         "  2. 入门\n"
@@ -721,7 +721,8 @@ _JUMP_STEP_TEXT = {
         "  4. 普及/提高−\n"
         "  5. 普及+/提高\n"
         "  6. 提高+/省选−\n"
-        "  7. 省选/NOI−\n\n"
+        "  7. 省选/NOI−\n"
+        "  8. NOI/NOI+/CTSC\n\n"
         "直接发送数字即可，如：2"
     ),
     'tags': (
@@ -957,7 +958,8 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
 
             # ── 构建合并转发节点 ──
             # 将 Markdown 内容按 1500 字分段，每段一个 Node
-            sender_id = event.get_sender_id() or '10000'
+            # 使用 bot 的 self_id 作为发送者，使合并转发显示为 bot 发送
+            sender_id = event.self_id or event.get_sender_id() or '10000'
             sender_name = '洛谷助手'
 
             nodes = []
@@ -1096,9 +1098,10 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
 
             if text.isdigit():
                 d = int(text)
-                if 0 <= d <= 7:
+                if 0 <= d <= 8:
                     state['difficulty'] = d if d > 0 else None
-                    diff_name = DIFFICULTY_NAMES[d] if d > 0 else '不限'
+                    # 用户选项 1→DIFFICULTY_NAMES[0]=暂无评定，2→DIFFICULTY_NAMES[1]=入门...
+                    diff_name = DIFFICULTY_NAMES[d - 1] if d > 0 else '不限'
                     await _send_text(f'✅ 已选择难度：{diff_name}')
                     step[0] = 'tags'
                     await _show_current_step()
