@@ -842,6 +842,80 @@ class ProblemFetcher:
             logger.warning(f'[Luogu] 获取筛选结果失败: {e}')
             return {'total': 0, 'total_pages': 0, 'page_size': 50, 'page_size_detected': 50}
 
+    def extract_problem_summaries(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """从当前题库列表页提取题目摘要。"""
+        limit = max(1, min(int(limit or 5), 10))
+        try:
+            rows = self.page.evaluate(
+                f"""
+                () => {{
+                    const limit = {limit};
+                    const anchors = Array.from(
+                        document.querySelectorAll('a[href*="/problem/P"], a[href*="/problem/p"]')
+                    );
+                    const seen = new Set();
+                    const results = [];
+
+                    const clean = (text) => (text || '').replace(/\\s+/g, ' ').trim();
+
+                    for (const anchor of anchors) {{
+                        const href = anchor.getAttribute('href') || '';
+                        const match = href.match(/\\/problem\\/(P?[A-Za-z0-9]+)/i);
+                        if (!match) continue;
+                        const pidRaw = match[1].toUpperCase();
+                        const pid = pidRaw.startsWith('P') ? pidRaw : `P${{pidRaw}}`;
+                        if (seen.has(pid)) continue;
+                        seen.add(pid);
+
+                        let container = anchor;
+                        for (let i = 0; i < 6 && container.parentElement; i++) {{
+                            container = container.parentElement;
+                        }}
+                        const scopeText = clean(container.innerText || '');
+                        const anchorText = clean(anchor.innerText || '');
+                        const title = anchorText && anchorText !== pid
+                            ? anchorText
+                            : clean(
+                                scopeText
+                                    .replace(pid, '')
+                                    .split(/提交|题解|讨论|通过率/)[0]
+                                    .slice(0, 120)
+                            );
+                        const diffMatch = scopeText.match(
+                            /暂无评定|入门|普及\\-|普及\\/提高\\-|普及\\+\\/提高|提高\\+\\/省选\\-|省选\\/NOI\\-|NOI\\/NOI\\+\\/CTSC/
+                        );
+
+                        results.push({{
+                            pid,
+                            title: title || pid,
+                            difficulty_name: diffMatch ? diffMatch[0] : '',
+                            url: href.startsWith('http') ? href : `https://www.luogu.com.cn/problem/${{pid}}`,
+                        }});
+                        if (results.length >= limit) break;
+                    }}
+                    return results;
+                }}
+                """
+            )
+            summaries: List[Dict[str, Any]] = []
+            for idx, row in enumerate(rows or [], start=1):
+                pid = str(row.get('pid') or '').strip()
+                if not pid:
+                    continue
+                summaries.append(
+                    {
+                        'index': idx,
+                        'pid': pid,
+                        'title': str(row.get('title') or pid).strip(),
+                        'difficulty_name': str(row.get('difficulty_name') or '').strip(),
+                        'url': str(row.get('url') or f'https://www.luogu.com.cn/problem/{pid}').strip(),
+                    }
+                )
+            return summaries
+        except Exception as e:
+            logger.warning(f'[Luogu] 提取题目摘要失败: {e}')
+            return []
+
     def _go_to_page(self, page_num: int):
         """跳转到指定页"""
         try:

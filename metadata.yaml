@@ -5,7 +5,7 @@ author: YourName
 repo: https://github.com/yourname/astrbot_plugin_luogu
 
 display_name: 洛谷助手
-astrbot_version: ">=4.0.0"
+astrbot_version: ">=4.5.7"
 support_platforms:
   - aiocqhttp
   - qq_official
