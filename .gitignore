@@ -12,6 +12,9 @@ cookies/*.json
 cookies/*.txt
 !cookies/.gitkeep
 
+# 账号密码（可选保存，加密存储）
+credentials/
+
 # 用户数据（绑定关系等）
 user_data/
 
