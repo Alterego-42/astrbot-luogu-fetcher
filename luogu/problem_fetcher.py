@@ -968,6 +968,8 @@ class ProblemFetcher:
     def _extract_markdown_from_page(self) -> Optional[str]:
         """从页面元素提取类似 Markdown 的内容"""
         try:
+            # 洛谷题目页面的内容可以通过 body 获取
+            # 需要过滤掉页面头部、底部等非题目内容
             md_content = self.page.evaluate("""
                 () => {
                     // 尝试找 Markdown 源内容区域
@@ -976,10 +978,26 @@ class ProblemFetcher:
                         || document.querySelector('.lg-markdown');
                     if (mdEl) return mdEl.innerText;
 
-                    // 兜底：从题目内容提取
+                    // 尝试找题目内容区域
                     const contentEl = document.querySelector('.problem-content')
                         || document.querySelector('.lg-content');
-                    return contentEl ? contentEl.innerText : null;
+                    if (contentEl) return contentEl.innerText;
+
+                    // 兜底：从 body 获取，然后过滤非题目内容
+                    const bodyText = document.body.innerText;
+                    // 找到"题目背景"或"题目描述"开始的位置
+                    const startMarkers = ['题目背景', '题目描述', '输入格式', '输出格式', '输入输出样例', '说明/提示'];
+                    let startIdx = -1;
+                    for (const marker of startMarkers) {
+                        const idx = bodyText.indexOf(marker);
+                        if (idx !== -1 && (startIdx === -1 || idx < startIdx)) {
+                            startIdx = idx;
+                        }
+                    }
+                    if (startIdx !== -1) {
+                        return bodyText.substring(startIdx);
+                    }
+                    return bodyText;
                 }
             """)
             return md_content if md_content and len(md_content) > 20 else None
