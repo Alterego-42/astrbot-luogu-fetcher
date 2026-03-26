@@ -2,7 +2,7 @@
 洛谷助手 AstrBot 插件
 
 指令列表：
-  /luogu bind <手机号> <密码>   绑定洛谷账号（通过 Playwright 登录并保存 cookie）
+  /luogu bind <手机号> <密码> [-s]   绑定洛谷账号（通过 Playwright 登录并保存 cookie，-s 保存账号密码）
   /luogu info [uid]             查看个人主页统计（统计卡片图片）
   /luogu checkin                每日打卡
   /luogu heatmap                做题热度日历图（近26周）
@@ -25,7 +25,7 @@ import asyncio
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 # ── 路径处理 ──────────────────────────────────────────────────
 _PLUGIN_DIR = Path(__file__).parent.resolve()
@@ -59,11 +59,13 @@ from luogu.chart_generator import (
 )
 
 # ── 常量 ──────────────────────────────────────────────────────
-COOKIES_DIR   = _PLUGIN_DIR / 'cookies'
-DATA_DIR      = _PLUGIN_DIR / 'user_data'
-BIND_FILE     = DATA_DIR / 'bindings.json'    # qq_id -> luogu_uid
+COOKIES_DIR    = _PLUGIN_DIR / 'cookies'
+DATA_DIR       = _PLUGIN_DIR / 'user_data'
+CREDENTIALS_DIR = _PLUGIN_DIR / 'credentials'  # 账号密码（可选保存）
+BIND_FILE      = DATA_DIR / 'bindings.json'    # qq_id -> luogu_uid
 COOKIES_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+CREDENTIALS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -95,6 +97,61 @@ def _uid_file(qq_id: str) -> Path:
 
 def _userdata_path(qq_id: str) -> Path:
     return DATA_DIR / f'userdata_{qq_id}.json'
+
+
+def _credentials_path(qq_id: str) -> Path:
+    """账号密码存储路径（加密）"""
+    return CREDENTIALS_DIR / f'cred_{qq_id}.bin'
+
+
+def _save_credentials(qq_id: str, username: str, password: str) -> bool:
+    """
+    保存账号密码（Base64 编码）
+    返回是否保存成功
+    """
+    import base64
+    try:
+        cred = f'{username}:{password}'
+        encoded = base64.b64encode(cred.encode('utf-8')).decode('ascii')
+        _credentials_path(qq_id).write_text(encoded, encoding='utf-8')
+        logger.info(f'[Luogu] 用户 {qq_id} 的账号密码已保存到本地')
+        return True
+    except Exception as e:
+        logger.warning(f'[Luogu] 保存账号密码失败: {e}')
+        return False
+
+
+def _load_credentials(qq_id: str) -> Optional[Tuple[str, str]]:
+    """加载账号密码，返回 (username, password) 或 None"""
+    import base64
+    cred_file = _credentials_path(qq_id)
+    if not cred_file.exists():
+        return None
+    try:
+        encoded = cred_file.read_text(encoding='utf-8')
+        cred = base64.b64decode(encoded.encode('ascii')).decode('utf-8')
+        username, password = cred.split(':', 1)
+        return (username, password)
+    except Exception as e:
+        logger.warning(f'[Luogu] 加载账号密码失败: {e}')
+        return None
+
+
+def _delete_credentials(qq_id: str) -> bool:
+    """删除保存的账号密码"""
+    try:
+        cred_file = _credentials_path(qq_id)
+        if cred_file.exists():
+            cred_file.unlink()
+        return True
+    except Exception as e:
+        logger.warning(f'[Luogu] 删除账号密码失败: {e}')
+        return False
+
+
+def _has_credentials(qq_id: str) -> bool:
+    """检查是否保存了账号密码"""
+    return _credentials_path(qq_id).exists()
 
 
 def _get_uid_for_qq(qq_id: str) -> Optional[str]:
@@ -255,10 +312,15 @@ def _task_screenshot_practice(fetcher: LuoguDataFetcher) -> Optional[bytes]:
 # 登录（同步 Playwright，需在线程中运行）
 # ════════════════════════════════════════════════════════════════
 
-def _do_login(username: str, password: str, qq_id: str) -> Dict:
+def _do_login(username: str, password: str, qq_id: str, save_credentials: bool = False) -> Dict:
     """
     通过 Playwright 登录洛谷，保存 cookies 到文件。
-    返回 {'success': bool, 'message': str, 'uid': str|None}
+    参数:
+        username: 洛谷手机号
+        password: 洛谷密码
+        qq_id: QQ 号
+        save_credentials: 是否保存账号密码到本地（可选，后续可自动登录）
+    返回 {'success': bool, 'message': str, 'uid': str|None, 'credentials_saved': bool}
     """
     from playwright.sync_api import sync_playwright
     import json as _json
@@ -414,6 +476,11 @@ def _do_login(username: str, password: str, qq_id: str) -> Dict:
                 encoding='utf-8'
             )
 
+            # 可选：保存账号密码
+            credentials_saved = False
+            if save_credentials:
+                credentials_saved = _save_credentials(qq_id, username, password)
+
             # 更新绑定表
             if uid:
                 bindings = _load_bindings()
@@ -458,10 +525,10 @@ def _do_login(username: str, password: str, qq_id: str) -> Dict:
                 logger.info(f'[Luogu] ✅ 用户数据已保存到 {user_data_file}')
                 
                 # 返回 OK emoji 标记获取成功
-                return {'success': True, 'message': '登录成功', 'uid': uid, 'data_saved': True}
+                return {'success': True, 'message': '登录成功', 'uid': uid, 'data_saved': True, 'credentials_saved': credentials_saved}
             except Exception as e:
                 logger.warning(f'[Luogu] 自动获取用户数据失败: {e}')
-                return {'success': True, 'message': '登录成功(部分数据获取失败)', 'uid': uid, 'data_saved': False}
+                return {'success': True, 'message': '登录成功(部分数据获取失败)', 'uid': uid, 'data_saved': False, 'credentials_saved': credentials_saved}
 
             # 不关闭浏览器，让 fetcher 继续使用
             # browser.close()
@@ -1415,8 +1482,11 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
 
 HELP_TEXT = """洛谷助手指令：
 
-/luogu bind <手机号> <密码>
+/luogu bind <手机号> <密码> [-s|--save]
   绑定洛谷账号
+  可选参数:
+    -s, --save   保存账号密码到本地（加密存储，后续自动登录）
+                注意：账号密码仅保存在本设备，不会上传
 
 /luogu info
   查看个人统计卡片
@@ -1472,23 +1542,47 @@ if _ASTRBOT:
                 return
 
             if sub == 'bind':
-                if len(args) < 4:
-                    yield event.plain_result("用法：/luogu bind <手机号> <密码>\n请注意在私聊中使用以保护密码安全")
+                # 解析参数：支持 /luogu bind <手机号> <密码> [-s|--save]
+                if len(args) < 3:
+                    yield event.plain_result("用法：/luogu bind <手机号> <密码> [-s|--save]\n"
+                                            "可选参数 -s: 保存账号密码到本地（加密存储）\n"
+                                            "请注意在私聊中使用以保护密码安全")
                     return
+
                 username = args[2]
-                password = args[3]
-                logger.info(f'[Luogu] 用户 {qq_id} 开始登录流程')
+                password = None
+                save_credentials = False
+
+                # 检查是否有 -s 或 --save 参数
+                raw_args = event.message_str.strip()
+                save_credentials = '-s' in raw_args or '--save' in raw_args
+
+                # 查找密码参数（可能在 -s 之前或之后）
+                for i, arg in enumerate(args[3:], start=3):
+                    if arg not in ('-s', '--save'):
+                        password = arg
+                        break
+
+                if not password:
+                    yield event.plain_result("用法：/luogu bind <手机号> <密码> [-s|--save]\n"
+                                            "请提供密码参数")
+                    return
+
+                logger.info(f'[Luogu] 用户 {qq_id} 开始登录流程，保存账号密码: {save_credentials}')
                 yield event.plain_result("🔐 正在登录洛谷，请稍候（约10~30秒）...")
                 loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, lambda: _do_login(username, password, qq_id))
+                result = await loop.run_in_executor(
+                    None, lambda: _do_login(username, password, qq_id, save_credentials)
+                )
                 if result['success']:
                     uid = result.get('uid', '未知')
                     logger.info(f'[Luogu] 用户 {qq_id} 登录成功，UID: {uid}，数据已保存')
-                    # 根据数据保存状态发送不同的成功消息 + QQ 表情
                     if result.get('data_saved'):
                         yield event.chain_result([Face(id=124), Plain(f" 绑定成功！洛谷 UID：{uid}")])
                     else:
                         yield event.chain_result([Face(id=123), Plain(f" 绑定成功！洛谷 UID：{uid}，部分数据获取失败")])
+                    if result.get('credentials_saved'):
+                        yield event.plain_result("✅ 账号密码已加密保存在本地（仅本设备可用）")
                 else:
                     logger.warning(f'[Luogu] 用户 {qq_id} 登录失败: {result["message"]}')
                     yield event.chain_result([Face(id=100), Plain(f" 绑定失败：{result['message']}")])
