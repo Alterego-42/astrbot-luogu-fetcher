@@ -978,9 +978,8 @@ class ProblemFetcher:
 
     def _fetch_markdown_via_api(self, pid: str) -> str:
         """通过洛谷 API 获取 Markdown（需要登录态）"""
-
-            if not pid:
-                return '（未能确定题目编号）'
+        if not pid:
+            return '（未能确定题目编号）'
 
             # 通过 API 获取原始 Markdown
             api_url = f'https://www.luogu.com.cn/problem/{pid}?_contentOnly=1'
