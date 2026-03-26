@@ -469,12 +469,12 @@ class ProblemFetcher:
 
     def _select_tags(self, tags: List[str]) -> bool:
         """
-        选择标签。
+        选择标签（支持多 Tab：算法/来源/时间/区域/特殊题目）。
 
         正确流程：
         1. 点击"算法/来源/时间/状态"按钮打开标签选择器
-        2. 找到标签选择弹窗（包含文本"选择标签"的 .l-card）
-        3. 在弹窗中查找并点击具体标签（.toggle-tag）
+        2. 找到标签选择弹窗（包含"选择标签"文本的 .l-card）
+        3. 对每个标签，先在当前 Tab 查找，找不到则遍历切换所有 Tab
         4. 点击确认按钮
         """
         try:
@@ -507,28 +507,12 @@ class ProblemFetcher:
 
             logger.info('[Luogu] 已打开标签选择弹窗')
 
-            # 3. 在弹窗中查找并点击标签
+            # 3. 对每个标签，尝试在当前及所有 Tab 中查找
             for tag in tags:
-                found = False
-
-                # 查找所有 .toggle-tag 元素
-                all_toggle_tags = tag_modal.locator('.toggle-tag')
-
-                for el in all_toggle_tags.all():
-                    try:
-                        el_text = el.inner_text().strip()
-                        # 精确匹配或包含匹配
-                        if el_text == tag or tag in el_text:
-                            el.click(force=True)
-                            time.sleep(0.3)
-                            logger.info(f'[Luogu] 已选中标签: {el_text}')
-                            found = True
-                            break
-                    except:
-                        pass
+                found = self._find_and_click_tag_in_modal(tag_modal, tag)
 
                 if not found:
-                    logger.warning(f'[Luogu] 标签不存在: {tag}')
+                    logger.warning(f'[Luogu] 标签不存在（所有 Tab 已搜索）: {tag}')
                     self._close_tag_modal()
                     return False
 
@@ -553,6 +537,92 @@ class ProblemFetcher:
             logger.warning(f'[Luogu] 选择标签失败: {e}')
             self._close_tag_modal()
             return False
+
+    def _find_and_click_tag_in_modal(self, tag_modal, tag: str) -> bool:
+        """
+        在弹窗中查找并点击指定标签，必要时切换 Tab。
+
+        Tab 列表：算法、来源、时间、区域、特殊题目
+        年份标签（2020/2021 等）在"时间" Tab
+        省份/城市标签在"区域" Tab
+        """
+        # 先在当前已显示的 .toggle-tag 中查找
+        if self._try_click_tag(tag_modal, tag):
+            return True
+
+        # 获取所有 Tab 按钮
+        tab_buttons = tag_modal.locator('.tab-button, .tab-item, [role="tab"], .tabs .item')
+        if tab_buttons.count() == 0:
+            # 尝试其他选择器
+            tab_buttons = self.page.locator('.l-card .tab-button, .l-card [class*="tab"] button, .l-card [class*="tab"] span')
+
+        tab_count = tab_buttons.count()
+        logger.info(f'[Luogu] 弹窗 Tab 数量: {tab_count}')
+
+        if tab_count > 0:
+            for i in range(tab_count):
+                try:
+                    btn = tab_buttons.nth(i)
+                    tab_text = btn.inner_text().strip()
+                    # 跳过已尝试过的 Tab（第一个默认已试过）
+                    if i == 0:
+                        continue
+                    logger.info(f'[Luogu] 切换到 Tab[{i}]: {tab_text}')
+                    btn.click(force=True)
+                    time.sleep(0.5)
+                    if self._try_click_tag(tag_modal, tag):
+                        return True
+                except Exception as e:
+                    logger.debug(f'[Luogu] 切换 Tab[{i}] 失败: {e}')
+
+        # 最后尝试：通过 JS 查找弹窗内所有文本匹配的元素
+        try:
+            found = self.page.evaluate(f"""
+                () => {{
+                    const modal = document.querySelector('.l-card');
+                    if (!modal) return false;
+                    const allEls = modal.querySelectorAll('*');
+                    for (const el of allEls) {{
+                        if (el.children.length === 0 && el.innerText && el.innerText.trim() === '{tag}') {{
+                            el.click();
+                            return true;
+                        }}
+                    }}
+                    // 模糊匹配
+                    for (const el of allEls) {{
+                        if (el.children.length === 0 && el.innerText && el.innerText.includes('{tag}')) {{
+                            el.click();
+                            return true;
+                        }}
+                    }}
+                    return false;
+                }}
+            """)
+            if found:
+                logger.info(f'[Luogu] JS 模糊匹配点击标签: {tag}')
+                time.sleep(0.3)
+                return True
+        except Exception as e:
+            logger.debug(f'[Luogu] JS 查找标签失败: {e}')
+
+        return False
+
+    def _try_click_tag(self, tag_modal, tag: str) -> bool:
+        """在 tag_modal 中查找并点击 .toggle-tag，返回是否成功"""
+        all_toggle_tags = tag_modal.locator('.toggle-tag')
+        for el in all_toggle_tags.all():
+            try:
+                el_text = el.inner_text().strip()
+                if el_text == tag or tag in el_text:
+                    el.click(force=True)
+                    time.sleep(0.3)
+                    logger.info(f'[Luogu] 已选中标签: {el_text}')
+                    return True
+            except:
+                pass
+        return False
+
+
 
     def _close_tag_modal(self):
         """关闭标签选择弹窗"""
@@ -739,88 +809,126 @@ class ProblemFetcher:
                 'tags': [],
             }
 
-    def extract_markdown_content(self) -> str:
+    def extract_markdown_content(self, pid: str = None) -> str:
         """
-        提取题目内容的 Markdown 文本。
+        通过洛谷 API 获取题目原始 Markdown 内容。
+
+        洛谷 API: GET /problem/{pid}?_contentOnly=1
+        返回 JSON，content.markdown.description 即为题面 Markdown。
+
+        Args:
+            pid: 题目编号（如 P1047）。若为 None，则从当前页面 URL 提取。
 
         Returns:
-            题目的 Markdown 格式文本
+            题目的原始 Markdown 格式文本
         """
         try:
-            # 等待题目内容加载
-            self.page.wait_for_load_state('networkidle', timeout=15000)
-            time.sleep(1)
+            # 确定 PID
+            if not pid:
+                current_url = self.page.url
+                pid_match = re.search(r'/problem/([Pp]?\w+)', current_url, re.IGNORECASE)
+                if pid_match:
+                    pid = pid_match.group(1)
+                    pid = 'P' + pid.lstrip('pP')
 
-            # 使用 JavaScript 提取 Markdown 内容
-            md_content = self.page.evaluate("""
-                () => {
-                    // 查找题目内容区域
-                    const contentEl = document.querySelector('.problem-content') 
-                        || document.querySelector('.lg-content')
-                        || document.querySelector('.main-container')
-                        || document.querySelector('#app');
+            if not pid:
+                return '（未能确定题目编号）'
 
-                    if (!contentEl) return '题目内容未找到';
+            # 通过 API 获取原始 Markdown
+            api_url = f'https://www.luogu.com.cn/problem/{pid}?_contentOnly=1'
+            logger.info(f'[Luogu] 通过 API 获取题目 Markdown: {api_url}')
 
-                    // 获取所有文本节点并拼接
-                    function getTextWithNewlines(el) {
-                        const parts = [];
-                        
-                        function processNode(node) {
-                            if (node.nodeType === Node.TEXT_NODE) {
-                                const text = node.textContent.trim();
-                                if (text) parts.push(text);
-                            } else if (node.nodeType === Node.ELEMENT_NODE) {
-                                const tag = node.tagName.toLowerCase();
-                                const skipTags = ['script', 'style', 'noscript'];
-                                if (skipTags.includes(tag)) return;
-                                
-                                const isBlock = ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-                                               'li', 'ul', 'ol', 'pre', 'blockquote', 'tr'].includes(tag);
-                                
-                                // 递归处理子节点
-                                for (const child of node.childNodes) {
-                                    processNode(child);
-                                }
-                                
-                                // 块级元素后换行
-                                if (isBlock && parts.length > 0 && !parts[parts.length-1].endsWith('\\n')) {
-                                    parts.push('\\n');
-                                }
-                            }
-                        }
-                        
-                        for (const child of el.childNodes) {
-                            processNode(child);
-                        }
-                        
-                        return parts.join(' ');
-                    }
-
-                    return getTextWithNewlines(contentEl);
-                }
+            # 在当前页面执行 fetch 请求，利用已有的登录 cookie
+            result = self.page.evaluate(f"""
+                async () => {{
+                    try {{
+                        const resp = await fetch('/problem/{pid}?_contentOnly=1', {{
+                            headers: {{
+                                'x-luogu-type': 'content-only',
+                                'accept': 'application/json'
+                            }}
+                        }});
+                        const data = await resp.json();
+                        return data;
+                    }} catch(e) {{
+                        return {{ error: e.toString() }};
+                    }}
+                }}
             """)
 
-            # 清理和格式化
-            lines = md_content.split('\n')
-            formatted_lines = []
-            for line in lines:
-                line = line.strip()
-                if line:
-                    # 处理标题
-                    if line.startswith('#'):
-                        formatted_lines.append(line)
-                    # 处理代码块标记
-                    elif '```' in line or line.startswith('    '):
-                        formatted_lines.append(line)
-                    else:
-                        formatted_lines.append(line)
-            
-            return '\n\n'.join(formatted_lines)
+            if isinstance(result, dict):
+                if result.get('error'):
+                    logger.warning(f'[Luogu] API 请求失败: {result["error"]}')
+                    return self._extract_markdown_fallback()
+
+                # 尝试从 JSON 中提取 Markdown
+                # 结构: result.currentData.problem.content (渲染后)
+                # 或:   result.currentData.problem.description (部分老接口)
+                # 洛谷实际 API 结构：result.currentData.problem.content
+                current_data = result.get('currentData', {})
+                problem_data = current_data.get('problem', {})
+
+                # content 字段通常是题目 Markdown 内容
+                content = problem_data.get('content', '')
+                if content and len(content) > 50:
+                    logger.info(f'[Luogu] 成功获取题目 Markdown，长度: {len(content)}')
+                    return content
+
+                # 备用字段
+                for field in ['description', 'body', 'statement']:
+                    val = problem_data.get(field, '')
+                    if val and len(val) > 50:
+                        logger.info(f'[Luogu] 通过字段 {field} 获取内容，长度: {len(val)}')
+                        return val
+
+                # 全量 dump 查找内容
+                logger.warning(f'[Luogu] API 返回结构异常，尝试全量提取')
+                raw_str = json.dumps(result, ensure_ascii=False)
+                if 'inputFormat' in raw_str or '输入格式' in raw_str or '输入描述' in raw_str:
+                    # 找最长的 Markdown 字段
+                    def _find_md(obj, depth=0):
+                        if depth > 10:
+                            return ''
+                        if isinstance(obj, str) and len(obj) > 100 and ('##' in obj or '\n\n' in obj or '输入' in obj):
+                            return obj
+                        if isinstance(obj, dict):
+                            for v in obj.values():
+                                r = _find_md(v, depth + 1)
+                                if r:
+                                    return r
+                        if isinstance(obj, list):
+                            for item in obj:
+                                r = _find_md(item, depth + 1)
+                                if r:
+                                    return r
+                        return ''
+                    found = _find_md(result)
+                    if found:
+                        return found
+
+            return self._extract_markdown_fallback()
 
         except Exception as e:
-            logger.warning(f'[Luogu] 提取 Markdown 内容失败: {e}')
-            return '提取题目内容失败'
+            logger.warning(f'[Luogu] 获取 Markdown 内容失败: {e}')
+            return self._extract_markdown_fallback()
+
+    def _extract_markdown_fallback(self) -> str:
+        """兜底：从当前页面 HTML 提取可读文本"""
+        try:
+            md_content = self.page.evaluate("""
+                () => {
+                    const contentEl = document.querySelector('.problem-content')
+                        || document.querySelector('.lg-content')
+                        || document.querySelector('.main-container');
+                    if (!contentEl) return '题目内容未找到';
+                    return contentEl.innerText || contentEl.textContent || '内容为空';
+                }
+            """)
+            if md_content and len(md_content) > 20:
+                return f'[注：以下为网页提取文本，非原始 Markdown]\n\n{md_content}'
+            return '（未能获取题目内容）'
+        except Exception as e:
+            return f'（内容提取失败: {e}）'
 
 
 # ── 便捷函数 ──────────────────────────────────────────────────

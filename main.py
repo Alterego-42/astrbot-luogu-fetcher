@@ -36,7 +36,7 @@ try:
     from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
     from astrbot.api.star import Context, Star, register
     from astrbot.api import logger
-    from astrbot.api.message_components import Face, Plain
+    from astrbot.api.message_components import Face, Plain, Node, Nodes, Image
     from astrbot.core.utils.session_waiter import session_waiter, SessionController
     _ASTRBOT = True
 except ImportError:
@@ -827,7 +827,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
 
     async def _send_img(img_path: str):
         mr = event.make_result()
-        mr.chain = [Comp.Image(path=img_path)]
+        mr.chain = [Comp.Image(file=img_path)]
         await event.send(mr)
 
     async def _show_current_step():
@@ -920,8 +920,8 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                 if not pid.upper().startswith('P'):
                     pid = 'P' + pid.upper().lstrip('P')
                 detail = fetcher.get_problem_detail(pid)
-                # 提取 Markdown 内容（不截图）
-                md_content = fetcher.extract_markdown_content()
+                # 通过 API 获取原始 Markdown 内容
+                md_content = fetcher.extract_markdown_content(pid)
                 return pid, detail, md_content, None
 
             result = await _run_in_pw(_do_show)
@@ -940,47 +940,82 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                 '省选/NOI−': '🟣', 'NOI/NOI+/CTSC': '⚫',
             }.get(diff_name, '⬜')
 
-            # ── 第一条消息：题目摘要 ──
+            # 保存当前 PID 到 state，供「看图」指令使用
+            state['current_pid'] = pid
+            state['current_md'] = md_content
+
+            # ── 题目摘要（头部信息） ──
             header = (
-                f'━━━ 题目详情 ━━━\n\n'
-                f'📌 {pid} {detail.get("title", "")}\n'
+                f'📌 {pid}  {detail.get("title", "")}\n'
                 f'{diff_emoji} 难度：{diff_name}'
             )
             if detail.get('passed_rate'):
                 header += f'\n📊 通过率：{detail.get("passed_rate")}'
             header += f'\n🔗 https://www.luogu.com.cn/problem/{pid}'
-            tags = detail.get('tags', [])
-            if tags:
-                header += f'\n🏷️ 标签：{"、".join(tags[:8])}'
-            await _send_text(header)
+            tags_list = detail.get('tags', [])
+            if tags_list:
+                header += f'\n🏷️ 标签：{"、".join(tags_list[:8])}'
 
-            # ── 第二条消息：Markdown 题面 + 点击指令 ──
-            # 保存当前 PID 和 Markdown 到 state，供「看图」指令使用
-            state['current_pid'] = pid
-            state['current_md'] = md_content
-            state['showed_md'] = True  # 标记已发送 Markdown，等待看图指令
+            # ── 构建合并转发节点 ──
+            # 将 Markdown 内容按 1500 字分段，每段一个 Node
+            sender_id = event.get_sender_id() or '10000'
+            sender_name = '洛谷助手'
 
-            # 截断过长的 Markdown
-            display_md = md_content[:2000] if md_content else '（题目内容为空）'
-            if len(md_content) > 2000:
-                display_md += '\n\n...（内容过长，已截断）'
+            nodes = []
 
-            md_msg = (
-                f'📄 题目内容（Markdown）：\n\n'
-                f'```\n{display_md}\n```\n\n'
-                f'─────────────────────\n'
-                f'💡 输入「看图」或「截图」查看渲染后的题面图片'
-            )
-            await _send_text(md_msg)
+            # Node 1: 摘要
+            nodes.append(Comp.Node(
+                uin=sender_id,
+                name=sender_name,
+                content=[Comp.Plain(header)],
+            ))
 
-            # ── Footer ──
+            # Node 2+: Markdown 内容分段
+            MAX_CHUNK = 1500
+            if md_content and len(md_content) > 20:
+                chunks = [md_content[i:i+MAX_CHUNK] for i in range(0, len(md_content), MAX_CHUNK)]
+                for idx, chunk in enumerate(chunks):
+                    label = f'📄 题目内容' if idx == 0 else f'📄 题目内容（续{idx}）'
+                    if len(chunks) > 1:
+                        label += f' [{idx+1}/{len(chunks)}]'
+                    nodes.append(Comp.Node(
+                        uin=sender_id,
+                        name=sender_name,
+                        content=[Comp.Plain(f'{label}\n\n{chunk}')],
+                    ))
+            else:
+                nodes.append(Comp.Node(
+                    uin=sender_id,
+                    name=sender_name,
+                    content=[Comp.Plain('📄 题目内容为空或获取失败')],
+                ))
+
+            # Node 尾部：操作提示
             footer = (
-                f'\n─────────────────────\n'
-                f'继续「random」随机下一题\n'
-                f'「back」返回重新选题\n'
-                f'「quit」退出'
+                '─────────────────────\n'
+                '💡 输入「看图」或「截图」查看渲染后题面截图\n'
+                '「random」随机下一题  「back」重新选题  「quit」退出'
             )
-            await _send_text(footer)
+            nodes.append(Comp.Node(
+                uin=sender_id,
+                name=sender_name,
+                content=[Comp.Plain(footer)],
+            ))
+
+            # 尝试合并转发，失败则降级为普通消息
+            try:
+                mr = event.make_result()
+                mr.chain = [Comp.Nodes(nodes)]
+                await event.send(mr)
+            except Exception as forward_err:
+                logger.warning(f'[Luogu jump] 合并转发失败，降级为普通消息: {forward_err}')
+                # 降级：仅发摘要 + 前 800 字
+                await _send_text(header)
+                short_md = md_content[:800] if md_content else '（内容为空）'
+                if len(md_content or '') > 800:
+                    short_md += '\n\n...（内容过长，输入「看图」查看截图）'
+                await _send_text(f'📄 题目内容：\n\n{short_md}')
+                await _send_text(footer)
 
             # 切换到 waiting_md 状态，等待用户输入「看图」指令
             step[0] = 'waiting_md'
