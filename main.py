@@ -839,10 +839,10 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
     async def _apply_filters() -> bool:
         nonlocal fetcher
         try:
-            # 使用单一实例
+            # 使用单一实例（setup() 必须在 to_thread 中执行）
             if fetcher is None:
                 fetcher = ProblemFetcher(_cookies)
-                fetcher.setup()
+                await asyncio.to_thread(fetcher.setup)
             else:
                 # 复用已有实例，确保 page 有效
                 logger.info('[Luogu jump] 复用已有 ProblemFetcher 实例')
@@ -882,10 +882,10 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
         """
         nonlocal fetcher
         try:
-            # 使用同一实例（如未初始化则新建）
+            # 使用同一实例（setup() 必须在 to_thread 中执行）
             if fetcher is None:
                 fetcher = ProblemFetcher(_cookies)
-                fetcher.setup()
+                await asyncio.to_thread(fetcher.setup)
                 # 恢复题库列表页
                 if state.get('list_url'):
                     def _goto_list():
@@ -1295,7 +1295,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
         # 清理：关闭 ProblemFetcher（释放浏览器资源）
         if fetcher is not None:
             try:
-                fetcher.close()
+                await asyncio.to_thread(fetcher.close)
                 logger.info('[Luogu jump] ProblemFetcher 已关闭')
             except Exception:
                 pass
