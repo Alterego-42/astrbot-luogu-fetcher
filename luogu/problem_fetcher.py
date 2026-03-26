@@ -472,8 +472,8 @@ class ProblemFetcher:
         选择标签（支持多 Tab：算法/来源/时间/区域/特殊题目）。
 
         正确流程：
-        1. 点击"算法/来源/时间/状态"按钮打开标签选择器
-        2. 找到标签选择弹窗（包含"选择标签"文本的 .l-card）
+        1. 点击"算法/来源/时间/状态"按钮打开标签选择器（.modal）
+        2. 找到标签选择弹窗（.modal，包含"选择标签"文本）
         3. 对每个标签，先在当前 Tab 查找，找不到则遍历切换所有 Tab
         4. 点击确认按钮
         """
@@ -490,16 +490,28 @@ class ProblemFetcher:
                 logger.warning('[Luogu] 未找到标签筛选按钮')
                 return False
 
-            # 2. 找到标签选择弹窗（包含"选择标签"文本的 .l-card）
+            # 2. 找到标签选择弹窗（.modal，包含"选择标签"文本）
             tag_modal = None
-            for card in self.page.locator('.l-card').all():
+            # 优先找 .modal 中的 l-card
+            for modal in self.page.locator('.modal').all():
                 try:
-                    txt = card.inner_text()
+                    txt = modal.inner_text()
                     if '选择标签' in txt:
-                        tag_modal = card
+                        tag_modal = modal
                         break
                 except:
                     pass
+            
+            # 备用：找包含"选择标签"的 .l-card
+            if not tag_modal:
+                for card in self.page.locator('.l-card').all():
+                    try:
+                        txt = card.inner_text()
+                        if '选择标签' in txt:
+                            tag_modal = card
+                            break
+                    except:
+                        pass
 
             if not tag_modal:
                 logger.warning('[Luogu] 未找到标签选择弹窗')
@@ -516,11 +528,11 @@ class ProblemFetcher:
                     self._close_tag_modal()
                     return False
 
-            # 4. 点击确认按钮
+            # 4. 点击确认按钮（在 modal 的 l-card 内）
             confirm_btn = tag_modal.locator('button.solid:has-text("确认")')
             if confirm_btn.count() == 0:
-                # 尝试在整个页面查找
-                confirm_btn = self.page.locator('.l-card button.solid:has-text("确认")')
+                # 尝试在整个 modal 查找
+                confirm_btn = self.page.locator('.modal button.solid:has-text("确认")')
 
             if confirm_btn.count() > 0:
                 confirm_btn.first.click(force=True)
@@ -542,65 +554,53 @@ class ProblemFetcher:
         """
         在弹窗中查找并点击指定标签，必要时切换 Tab。
 
-        核心问题：不能用 `parent.locator(selector)` 来找 Tab 按钮，
-        因为它会匹配到页面其他区域的同名元素（如题库列表的表头按钮）。
-
+        核心问题：洛谷标签弹窗在 .modal > .l-card 中，Tab 是 .entry 元素。
+        
         正确策略：
         1. 先在当前已显示的 .toggle-tag 中查找
-        2. 用 JS 在弹窗内搜索标签元素（限制在弹窗 DOM 子树内）
-        3. 如果未找到，用 JS 找 Tab 按钮并切换到对应 Tab
+        2. 用 JS 在 modal 内搜索标签元素
+        3. 如果未找到，切换 Tab 后重试
         """
         # Step 1: 先在当前已显示的 .toggle-tag 中查找
         if self._try_click_tag(tag_modal, tag):
             return True
 
-        # Step 2: 用 JS 在弹窗内搜索标签（仅弹窗 DOM 子树内）
+        # Step 2: 用 JS 在 modal 内搜索标签
         found = self._js_find_and_click_tag_in_modal(tag)
         if found:
             return True
 
         # Step 3: 仍未找到 → 切换 Tab 后重试
-        # 用 JS 找到所有可点击的 Tab 按钮
-        tab_info_list = self.page.evaluate("""
+        # Tab 是 .modal .entry 元素（span.entry）
+        tab_entries = self.page.evaluate("""
             () => {
-                const modal = document.querySelector('.l-card');
+                const modal = document.querySelector('.modal');
                 if (!modal) return [];
-                const tabs = [];
-                // 查找所有可能是 Tab 的按钮/span 元素
-                const buttons = modal.querySelectorAll('button, [role="tab"], span, div');
-                const seen = new Set();
-                for (const el of buttons) {
-                    const text = el.innerText ? el.innerText.trim() : '';
-                    // 只保留短文本（Tab 标签通常 2-6 个字符）
-                    if (text && text.length <= 8 && !seen.has(text)) {
-                        seen.add(text);
-                        tabs.push({ text, el: el });
-                    }
-                }
-                return tabs.map(t => t.text);
+                const entries = modal.querySelectorAll('.entry');
+                return Array.from(entries).map(el => el.innerText.trim());
             }
         """)
-
-        if not tab_info_list:
-            logger.warning(f'[Luogu] 未找到任何 Tab 按钮')
+        
+        if not tab_entries:
+            logger.warning('[Luogu] 未找到任何 Tab 按钮')
             return False
 
-        logger.info(f'[Luogu] 弹窗 Tab 列表: {tab_info_list}')
+        logger.info(f'[Luogu] 弹窗 Tab 列表: {tab_entries}')
 
-        # 遍历所有发现的 Tab 按钮
-        for tab_text in tab_info_list:
-            if not tab_text:  # 跳过空文本
+        # 遍历所有 Tab
+        for tab_text in tab_entries:
+            if not tab_text:
                 continue
             logger.info(f'[Luogu] 尝试切换到 Tab: "{tab_text}"')
-            # 用 JS 点击这个 Tab
+            
+            # 点击这个 Tab
             clicked = self.page.evaluate(f"""
                 () => {{
-                    const modal = document.querySelector('.l-card');
+                    const modal = document.querySelector('.modal');
                     if (!modal) return false;
-                    const allEls = modal.querySelectorAll('*');
-                    for (const el of allEls) {{
-                        const text = (el.innerText || '').trim();
-                        if (text === '{tab_text}' && (el.tagName === 'BUTTON' || el.getAttribute('role') === 'tab' || el.className.includes('tab'))) {{
+                    const entries = modal.querySelectorAll('.entry');
+                    for (const el of entries) {{
+                        if (el.innerText.trim() === '{tab_text}') {{
                             el.click();
                             return true;
                         }}
@@ -620,19 +620,16 @@ class ProblemFetcher:
 
     def _js_find_and_click_tag_in_modal(self, tag: str) -> bool:
         """
-        用 JS 在弹窗内搜索并点击标签元素。
-        仅搜索弹窗 DOM 子树（.l-card），不污染页面其他区域。
-        策略：精确匹配 → 模糊匹配。
+        用 JS 在 modal 内搜索并点击标签元素。
         """
         for strategy in ('exact', 'fuzzy'):
             try:
-                cmp = '===' if strategy == 'exact' else 'includes'
                 found = self.page.evaluate(f"""
                     () => {{
-                        const modal = document.querySelector('.l-card');
+                        const modal = document.querySelector('.modal');
                         if (!modal) return false;
-                        const allEls = modal.querySelectorAll('*');
-                        for (const el of allEls) {{
+                        const tags = modal.querySelectorAll('.toggle-tag');
+                        for (const el of tags) {{
                             const text = (el.innerText || '').trim();
                             let match = false;
                             if ('{strategy}' === 'exact') {{
@@ -680,8 +677,15 @@ class ProblemFetcher:
             self.page.keyboard.press('Escape')
             time.sleep(0.3)
 
-            # 方法2: 点击关闭按钮
-            close_btn = self.page.locator('.l-card button:has-text("确认"), .l-card .close')
+            # 方法2: 点击确认按钮（modal 内的确认按钮）
+            confirm_btn = self.page.locator('.modal button.solid:has-text("确认")')
+            if confirm_btn.count() > 0:
+                confirm_btn.first.click(force=True)
+                time.sleep(0.3)
+                return
+
+            # 方法3: 点击关闭按钮
+            close_btn = self.page.locator('.modal .close, .modal button:has-text("确认")')
             if close_btn.count() > 0:
                 close_btn.first.click(force=True)
                 time.sleep(0.3)
