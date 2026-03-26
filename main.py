@@ -242,31 +242,35 @@ def _check_cookie_valid(cookies_file: str) -> bool:
         if not cookies:
             return False
 
-        # 调用 API 检测
-        resp = requests.get(
-            'https://www.luogu.com.cn/api/visitor/user',
-            cookies=cookies,
-            headers={
-                'Accept': 'application/json',
-                'Referer': 'https://www.luogu.com.cn/',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            },
-            timeout=10
-        )
-
-        if resp.status_code != 200:
-            logger.warning(f'[Luogu] Cookie 检测失败: HTTP {resp.status_code}')
-            return False
-
-        data = resp.json()
-        logger.info(f'[Luogu] Cookie 检测响应: code={data.get("code")}, user={"有" if data.get("user") else "无"}')
-        # 如果返回了用户数据，说明 cookie 有效
-        if data.get('code') == 200 and data.get('user'):
-            return True
-        # 备用：检查 code == 1 也可能表示有效（有 user 数据）
-        if data.get('code') == 1 and data.get('user'):
-            logger.info('[Luogu] Cookie 检测: code=1 但有 user，认为有效')
-            return True
+        # 调用 API 检测 - 使用正确的验证登录状态 API
+        for api_url in [
+            'https://www.luogu.com.cn/fe/api/user/current',
+            'https://www.luogu.com.cn/api/user/currentUser',
+        ]:
+            try:
+                resp = requests.get(
+                    api_url,
+                    cookies=cookies,
+                    headers={
+                        'Accept': 'application/json',
+                        'Referer': 'https://www.luogu.com.cn/',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    },
+                    timeout=10
+                )
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                # 检查是否有 currentUser 或 user 数据
+                current_user = data.get('currentUser') or data.get('user')
+                if current_user:
+                    uid = current_user.get('uid') if isinstance(current_user, dict) else current_user
+                    logger.info(f'[Luogu] Cookie 检测成功, uid={uid}')
+                    return True
+            except Exception as e:
+                logger.warning(f'[Luogu] Cookie 检测 API {api_url} 失败: {e}')
+                continue
+        logger.warning('[Luogu] Cookie 检测失败: 所有 API 都无法验证')
         return False
     except Exception as e:
         logger.warning(f'[Luogu] Cookie 检测失败: {e}')
