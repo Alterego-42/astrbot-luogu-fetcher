@@ -249,6 +249,7 @@ def _check_cookie_valid(cookies_file: str) -> bool:
             headers={
                 'Accept': 'application/json',
                 'Referer': 'https://www.luogu.com.cn/',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             },
             timeout=10
         )
@@ -917,13 +918,41 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
     cookie_valid = await asyncio.get_event_loop().run_in_executor(
         None, _check_cookie_valid, cookies_file
     )
+
+    # 如果 cookie 无效，检查是否有保存的账密并尝试自动重新登录
     if not cookie_valid:
-        logger.warning('[Luogu jump] Cookie 已过期，提示用户重新绑定')
-        yield event.plain_result(
-            '⚠️ 登录状态已失效，请重新绑定账号后继续。\n'
-            '使用方法：/luogu bind <手机号> <密码>'
-        )
-        return
+        logger.warning('[Luogu jump] Cookie 已过期，检查是否有保存的账密...')
+        creds = _load_credentials(qq_id)
+        if creds:
+            username, password = creds
+            logger.info(f'[Luogu jump] 发现保存的账密，正在自动登录...')
+            yield event.plain_result("🔄 Cookie 已过期，正在使用保存的账密自动重新登录...")
+            loop = asyncio.get_event_loop()
+            login_result = await loop.run_in_executor(
+                None, lambda: _do_login(username, password, qq_id, save_credentials=False)
+            )
+            if login_result.get('success'):
+                logger.info(f'[Luogu jump] 自动登录成功')
+                # 重新检测 cookie
+                cookie_valid = await asyncio.get_event_loop().run_in_executor(
+                    None, _check_cookie_valid, cookies_file
+                )
+                if not cookie_valid:
+                    yield event.plain_result('⚠️ 自动登录成功但 Cookie 仍无效，请重新绑定')
+                    return
+            else:
+                yield event.plain_result(
+                    f'⚠️ 自动登录失败：{login_result.get("message", "未知错误")}\n'
+                    '请重新绑定账号'
+                )
+                return
+        else:
+            logger.warning('[Luogu jump] Cookie 已过期，且无保存的账密')
+            yield event.plain_result(
+                '⚠️ 登录状态已失效，请重新绑定账号后继续。\n'
+                '使用方法：/luogu bind <手机号> <密码>'
+            )
+            return
 
     # --- 专用单线程 executor（所有 Playwright 操作必须在同一线程） ---
     _pw_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='pw_jump')
