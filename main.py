@@ -958,6 +958,28 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
             seen.add(tag_full)
         return normalized
 
+    def _normalize_tag_list_with_meta(tags: Any) -> Tuple[list[str], list[str]]:
+        normalized: list[str] = []
+        unresolved: list[str] = []
+        seen_normalized = set()
+        seen_unresolved = set()
+        for raw in tags or []:
+            tag_name = str(raw).strip()
+            if not tag_name:
+                continue
+            tag_full, matched = _normalize_tag_input(tag_name)
+            if matched:
+                if tag_full in seen_normalized:
+                    continue
+                normalized.append(tag_full)
+                seen_normalized.add(tag_full)
+                continue
+            if tag_name in seen_unresolved:
+                continue
+            unresolved.append(tag_name)
+            seen_unresolved.add(tag_name)
+        return normalized, unresolved
+
     def _resolve_selected_tag(tag_name: str) -> Optional[str]:
         raw = tag_name.strip()
         if not raw:
@@ -1123,8 +1145,21 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
 
             if intent_has_filters:
                 state['difficulty'] = intent.get('difficulty') or None
-                state['tags'] = _normalize_tag_list(intent.get('tags'))
+                normalized_tags, unresolved_tags = _normalize_tag_list_with_meta(intent.get('tags'))
+                state['tags'] = normalized_tags
                 state['keyword'] = intent.get('keyword') or None
+                if unresolved_tags:
+                    unresolved_text = ' '.join(unresolved_tags)
+                    if state['keyword']:
+                        if unresolved_text not in state['keyword']:
+                            state['keyword'] = f'{state["keyword"]} {unresolved_text}'.strip()
+                    else:
+                        state['keyword'] = unresolved_text
+                    await _send_text(
+                        'ℹ️ 洛谷里没有这些精确标签：'
+                        + '、'.join(unresolved_tags)
+                        + '。这次我先把它们当关键词一起筛。'
+                    )
 
             await _send_text('🔍 正在按你的描述筛题，请稍候...')
             ok = await _apply_filters()

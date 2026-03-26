@@ -118,8 +118,6 @@ TAG_ALIASES = {
     "状压dp": "状压 DP",
     "状态压缩dp": "状压 DP",
     "状态压缩": "状压 DP",
-    "次小生成树": "生成树",
-    "最小生成树": "生成树",
     "o2优化": "O2优化",
 }
 
@@ -170,7 +168,6 @@ def fuzzy_match_tag(input_tag: str) -> list[str]:
         if input_compact and (
             input_compact == tag_compact
             or input_compact in tag_compact
-            or tag_compact in input_compact
         ):
             matches.append(tag)
             continue

@@ -392,33 +392,81 @@ class ProblemFetcher:
                     pid = pid_match.group(1)
                     pid = 'P' + pid.lstrip('pP')
 
-            # 截图题目内容区域
-            selectors = [
-                '.problem-content',
-                '.lg-content',
-                '#app .content',
-                '.main-container',
-                '#app',
-            ]
+            marked = self.page.evaluate("""
+                () => {
+                    const attr = 'data-codex-problem-shot';
+                    document.querySelectorAll(`[${attr}]`).forEach(el => el.removeAttribute(attr));
+                    const headingTexts = ['题目描述', '输入格式', '输出格式', '输入输出样例', '说明/提示', '题目背景', '题面翻译'];
+                    const seen = new Set();
+                    const candidates = [];
 
-            for selector in selectors:
-                elements = self.page.locator(selector)
-                if elements.count() > 0:
-                    el = elements.first
-                    box = el.bounding_box()
-                    if box and box['width'] > 100 and box['height'] > 100:
-                        # 截图
-                        img_bytes = self.page.screenshot(
-                            type='png',
-                            clip={
-                                'x': max(0, box['x']),
-                                'y': max(0, box['y']),
-                                'width': min(box['width'], 1200),
-                                'height': min(box['height'], 900),
-                            }
-                        )
-                        logger.info(f'[Luogu] 题目 {pid} 截图成功')
-                        return img_bytes
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        if (style.display === 'none' || style.visibility === 'hidden') return false;
+                        const rect = el.getBoundingClientRect();
+                        return rect.width > 320 && rect.height > 180;
+                    };
+
+                    const headingCount = (text) => headingTexts.filter(item => text.includes(item)).length;
+
+                    const addCandidate = (el, source) => {
+                        if (!el || seen.has(el) || !isVisible(el)) return;
+                        seen.add(el);
+                        const text = (el.innerText || '').trim();
+                        if (!text) return;
+                        const count = headingCount(text);
+                        if (count < 2 && source !== 'fallback') return;
+                        const rect = el.getBoundingClientRect();
+                        const area = rect.width * rect.height;
+                        if (area > window.innerWidth * Math.max(document.body.scrollHeight, window.innerHeight) * 0.9) return;
+                        candidates.push({
+                            el,
+                            score: count * 1000000 - area - Math.abs(rect.top) * 100,
+                        });
+                    };
+
+                    document.querySelectorAll('h1, h2, h3').forEach(node => {
+                        const text = (node.textContent || '').trim();
+                        if (!headingTexts.includes(text)) return;
+                        let current = node.parentElement;
+                        let depth = 0;
+                        while (current && depth < 6) {
+                            addCandidate(current, 'heading');
+                            current = current.parentElement;
+                            depth += 1;
+                        }
+                    });
+
+                    [
+                        '.sidebar-container .main',
+                        '.columba-content-wrap .main',
+                        'main .main',
+                        'main article',
+                        'main section',
+                        '.main-container article',
+                        '.main-container section',
+                        '.problem-content',
+                        '.lg-content',
+                        '.card',
+                        'main',
+                    ].forEach(selector => {
+                        document.querySelectorAll(selector).forEach(el => addCandidate(el, 'fallback'));
+                    });
+
+                    if (!candidates.length) return null;
+                    candidates.sort((a, b) => b.score - a.score);
+                    candidates[0].el.setAttribute(attr, '1');
+                    return true;
+                }
+            """)
+
+            if marked:
+                target = self.page.locator('[data-codex-problem-shot="1"]').first
+                if target.count() > 0:
+                    img_bytes = target.screenshot(type='png')
+                    logger.info(f'[Luogu] 题目 {pid} 截图成功（题面模块）')
+                    return img_bytes
 
             # 兜底：截取可视区域
             img_bytes = self.page.screenshot(type='png')
