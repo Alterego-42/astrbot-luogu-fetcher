@@ -255,11 +255,17 @@ def _check_cookie_valid(cookies_file: str) -> bool:
         )
 
         if resp.status_code != 200:
+            logger.warning(f'[Luogu] Cookie 检测失败: HTTP {resp.status_code}')
             return False
 
         data = resp.json()
+        logger.info(f'[Luogu] Cookie 检测响应: code={data.get("code")}, user={"有" if data.get("user") else "无"}')
         # 如果返回了用户数据，说明 cookie 有效
         if data.get('code') == 200 and data.get('user'):
+            return True
+        # 备用：检查 code == 1 也可能表示有效（有 user 数据）
+        if data.get('code') == 1 and data.get('user'):
+            logger.info('[Luogu] Cookie 检测: code=1 但有 user，认为有效')
             return True
         return False
     except Exception as e:
@@ -933,11 +939,14 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                 None, lambda: _do_login(username, password, qq_id, save_credentials=False)
             )
             if login_result.get('success'):
-                logger.info(f'[Luogu jump] 自动登录成功')
+                logger.info(f'[Luogu jump] 自动登录成功，等待 cookie 写入...')
+                # 等待 cookie 文件写入完成
+                await asyncio.sleep(0.5)
                 # 重新检测 cookie
                 cookie_valid = await asyncio.get_event_loop().run_in_executor(
                     None, _check_cookie_valid, cookies_file
                 )
+                logger.info(f'[Luogu jump] 重新检测 cookie 有效性: {cookie_valid}')
                 if not cookie_valid:
                     yield event.plain_result('⚠️ 自动登录成功但 Cookie 仍无效，请重新绑定')
                     return
