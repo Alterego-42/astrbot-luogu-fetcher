@@ -31,5 +31,9 @@ test_output.txt
 *.swp
 *.swo
 
+# Spec-coding artifacts
+.spec/
+.claude/
+
 # macOS
 .DS_Store

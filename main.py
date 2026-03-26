@@ -57,6 +57,16 @@ from luogu.chart_generator import (
     generate_bar_chart,
     generate_difficulty_cards,
 )
+from luogu.jump_session import (
+    JUMP_HELP_TEXT,
+    render_jump_step,
+    render_no_result_prompt,
+    render_selected_tags_update,
+    render_problem_header,
+    render_problem_footer,
+    split_markdown_chunks,
+)
+from luogu.nl_jump import parse_jump_natural_language
 
 # ── 常量 ──────────────────────────────────────────────────────
 COOKIES_DIR    = _PLUGIN_DIR / 'cookies'
@@ -827,81 +837,7 @@ def _build_problem_html(detail: dict) -> str:
     )
 
 
-# ════════════════════════════════════════════════════════════════
-# /jump 题库跳转：5步状态机会话
-# ════════════════════════════════════════════════════════════════
-
-_JUMP_STEP_TEXT = {
-    'difficulty': (
-        "━━━ Step 1：难度筛选 ━━━\n\n"
-        "请选择题目难度（输入数字 0-8）：\n\n"
-        "  0. 跳过（不限难度）\n"
-        "  1. 暂无评定\n"
-        "  2. 入门\n"
-        "  3. 普及−\n"
-        "  4. 普及/提高−\n"
-        "  5. 普及+/提高\n"
-        "  6. 提高+/省选−\n"
-        "  7. 省选/NOI−\n"
-        "  8. NOI/NOI+/CTSC\n\n"
-        "直接发送数字即可，如：2"
-    ),
-    'tags': (
-        "━━━ Step 2：标签筛选 ━━━\n\n"
-        "请输入算法/来源/时间/特殊标签：\n\n"
-        "  输入 +标签  添加（如 +动规）\n"
-        "  输入 -标签  移除（如 -动规）\n"
-        "  输入 done  确认筛选\n\n"
-        "支持模糊匹配，如：+图论、+DP、+字符串\n\n"
-        "当前已选标签：{current_tags}\n\n"
-        "示例：\n"
-        "  +动规  → 添加「动态规划」\n"
-        "  -搜索  → 移除「搜索」\n"
-        "  done   → 确认并进入下一步"
-    ),
-    'keyword': (
-        "━━━ Step 3：关键词筛选（可选） ━━━\n\n"
-        "请输入标题关键词（直接输入，留空跳过）：\n\n"
-        "  输入 skip 跳过此步\n"
-        "  或直接输入关键词，如：模拟、贪心\n\n"
-        "当前筛选条件：\n"
-        "  难度：{difficulty_str}\n"
-        "  标签：{tags_str}\n"
-        "  关键词：{keyword_str}"
-    ),
-    'result': (
-        "━━━ Step 4：筛选结果 ━━━\n\n"
-        "共筛选出 {total} 道题\n\n"
-        "  请输入序号（1-{total}）选题\n"
-        "  或输入 random 随机选一道\n"
-        "  或输入 back 返回修改筛选\n\n"
-        "当前筛选条件：\n"
-        "  难度：{difficulty_str}\n"
-        "  标签：{tags_str}\n"
-        "  关键词：{keyword_str}"
-    ),
-}
-
-
-def _jump_diff_str(state):
-    # state['difficulty'] 是用户选项数字（0=不限, 1=暂无评定, 2=入门, 3=普及-, ...）
-    # DIFFICULTY_NAMES 是 0-indexed（0=暂无评定, 1=入门, 2=普及-, ...）
-    d = state.get('difficulty')
-    if d is None:
-        return '不限'
-    # 用户选项 1=暂无评定(difficulty=0), 2=入门(difficulty=1), 3=普及-(difficulty=2), ...
-    return DIFFICULTY_NAMES[d - 1] if 1 <= d <= 8 else '不限'
-
-
-def _jump_tags_str(state):
-    return '、'.join(state['tags']) if state['tags'] else '无'
-
-
-def _jump_kw_str(state):
-    return state.get('keyword') or '无'
-
-
-async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
+async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent, cookies_file: str):
     """
     多轮题库跳转（5步状态机）。
 
@@ -998,23 +934,140 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
 
     async def _show_current_step():
         s = step[0]
-        if s == 'tags':
-            await _send_text(_JUMP_STEP_TEXT['tags'].format(
-                current_tags=_jump_tags_str(state) or '（无）'
-            ))
-        elif s == 'keyword':
-            await _send_text(_JUMP_STEP_TEXT['keyword'].format(
-                difficulty_str=_jump_diff_str(state),
-                tags_str=_jump_tags_str(state),
-                keyword_str=_jump_kw_str(state),
-            ))
-        elif s == 'result':
-            await _send_text(_JUMP_STEP_TEXT['result'].format(
-                total=state['total'],
-                difficulty_str=_jump_diff_str(state),
-                tags_str=_jump_tags_str(state),
-                keyword_str=_jump_kw_str(state),
-            ))
+        await _send_text(render_jump_step(s, state))
+
+    async def _parse_natural_language_intent(text: str) -> Optional[Dict[str, Any]]:
+        if not context or not text.strip():
+            return None
+        intent = await parse_jump_natural_language(context, event, text, HOT_TAGS)
+        if intent:
+            logger.info(f'[Luogu jump] 自然语言意图: {intent}')
+        return intent
+
+    async def _handle_natural_language_intent(
+        controller: SessionController,
+        intent: Optional[Dict[str, Any]],
+    ) -> bool:
+        if not intent:
+            return False
+
+        action = intent.get('action')
+        if intent.get('need_clarification'):
+            await _send_text(intent.get('clarification') or '我还差一点条件才能开始筛题。')
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        reply = intent.get('reply')
+        if reply:
+            await _send_text(reply)
+
+        if action == 'help':
+            await _send_text(JUMP_HELP_TEXT)
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if action == 'quit':
+            await _send_text('✅ 已退出题库跳转，下次见！')
+            controller.stop()
+            return True
+
+        if action == 'restart':
+            state['difficulty'] = None
+            state['tags'] = []
+            state['keyword'] = None
+            state['total'] = 0
+            step[0] = 'difficulty'
+            await _send_text('← 已重置筛选条件，我们从头开始。')
+            await _send_text(render_jump_step('difficulty', state))
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if action == 'back':
+            if step[0] in ('result', 'waiting_md', 'keyword'):
+                state['keyword'] = None
+                state['total'] = 0
+                step[0] = 'keyword'
+                await _send_text('← 返回关键词筛选步骤（保留难度和标签）')
+                await _show_current_step()
+            else:
+                step[0] = 'difficulty'
+                await _send_text('← 返回难度筛选步骤')
+                await _send_text(render_jump_step('difficulty', state))
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if action == 'show_image':
+            if step[0] != 'waiting_md' or not state.get('current_pid'):
+                await _send_text('先选出一道题，我再帮你渲染题面图片。')
+                controller.keep(timeout=180, reset_timeout=True)
+                return True
+            await _send_text('🖼️ 正在渲染题面图片，请稍候...')
+            await _render_and_send_screenshot()
+            step[0] = 'result'
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        intent_has_filters = (
+            intent.get('difficulty') is not None
+            or bool(intent.get('tags'))
+            or bool(intent.get('keyword'))
+        )
+
+        if action in ('search', 'random', 'select'):
+            if action in ('random', 'select') and state.get('total') and not intent_has_filters:
+                if action == 'random':
+                    import random as _rand
+                    pos = _rand.randint(1, state['total'])
+                    await _send_text(f'🎲 随机选题（第 {pos} / {state["total"]}）')
+                    await _show_problem(pos)
+                else:
+                    index = intent.get('index')
+                    if index and 1 <= index <= state['total']:
+                        await _show_problem(index)
+                    else:
+                        await _send_text(f'⚠️ 序号超出范围，请输入 1-{state["total"]}')
+                controller.keep(timeout=180, reset_timeout=True)
+                return True
+
+            if intent.get('difficulty') is not None:
+                state['difficulty'] = intent['difficulty'] or None
+            if intent.get('tags'):
+                state['tags'] = intent['tags']
+            if intent.get('keyword'):
+                state['keyword'] = intent['keyword']
+
+            await _send_text('🔍 正在按你的描述筛题，请稍候...')
+            ok = await _apply_filters()
+            if not ok:
+                controller.keep(timeout=180, reset_timeout=True)
+                return True
+
+            if state['total'] == 0:
+                step[0] = 'result'
+                await _send_text(render_no_result_prompt(state))
+                controller.keep(timeout=180, reset_timeout=True)
+                return True
+
+            step[0] = 'result'
+            if action == 'random':
+                import random as _rand
+                pos = _rand.randint(1, state['total'])
+                await _send_text(f'🎲 随机选题（第 {pos} / {state["total"]}）')
+                await _show_problem(pos)
+            elif action == 'select':
+                index = intent.get('index')
+                if index and 1 <= index <= state['total']:
+                    await _show_problem(index)
+                else:
+                    await _send_text(f'⚠️ 序号超出范围，请输入 1-{state["total"]}')
+                    await _show_current_step()
+            else:
+                await _show_current_step()
+
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        return False
 
     async def _apply_filters() -> bool:
         nonlocal fetcher
@@ -1099,28 +1152,12 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                 await _send_text(result[3])  # 错误消息
                 return
 
-            diff_name = detail.get('difficulty_name', '暂无评定')
-            diff_emoji = {
-                '暂无评定': '⚪', '入门': '🔴', '普及−': '🟠',
-                '普及/提高−': '🟡', '普及+/提高': '🟢', '提高+/省选−': '🔵',
-                '省选/NOI−': '🟣', 'NOI/NOI+/CTSC': '⚫',
-            }.get(diff_name, '⬜')
-
             # 保存当前 PID 到 state，供「看图」指令使用
             state['current_pid'] = pid
             state['current_md'] = md_content
 
             # ── 题目摘要（头部信息） ──
-            header = (
-                f'📌 {pid}  {detail.get("title", "")}\n'
-                f'{diff_emoji} 难度：{diff_name}'
-            )
-            if detail.get('passed_rate'):
-                header += f'\n📊 通过率：{detail.get("passed_rate")}'
-            header += f'\n🔗 https://www.luogu.com.cn/problem/{pid}'
-            tags_list = detail.get('tags', [])
-            if tags_list:
-                header += f'\n🏷️ 标签：{"、".join(tags_list[:8])}'
+            header = render_problem_header(pid, detail)
 
             # ── 构建合并转发节点 ──
             # 将 Markdown 内容按 1500 字分段，每段一个 Node
@@ -1138,9 +1175,8 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
             ))
 
             # Node 2+: Markdown 内容分段
-            MAX_CHUNK = 1500
             if md_content and len(md_content) > 20:
-                chunks = [md_content[i:i+MAX_CHUNK] for i in range(0, len(md_content), MAX_CHUNK)]
+                chunks = split_markdown_chunks(md_content)
                 for idx, chunk in enumerate(chunks):
                     label = f'📄 题目内容' if idx == 0 else f'📄 题目内容（续{idx}）'
                     if len(chunks) > 1:
@@ -1158,11 +1194,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                 ))
 
             # Node 尾部：操作提示
-            footer = (
-                '─────────────────────\n'
-                '💡 输入「看图」或「截图」查看渲染后题面截图\n'
-                '「random」随机下一题  「back」重新选题  「quit」退出'
-            )
+            footer = render_problem_footer()
             nodes.append(Comp.Node(
                 uin=sender_id,
                 name=sender_name,
@@ -1238,18 +1270,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
             return
 
         if lower in ('help', '帮助', '?'):
-            await _send_text(
-                "📖 题库跳转帮助：\n\n"
-                "  数字 0-7   → 选择难度\n"
-                "  +标签      → 添加标签（支持模糊匹配）\n"
-                "  -标签      → 移除标签\n"
-                "  done       → 确认标签，进入下一步\n"
-                "  skip       → 跳过当前步骤\n"
-                "  random     → 随机选题\n"
-                "  看图/截图  → 渲染题目图片（显示题面）\n"
-                "  back       → 返回上一步\n"
-                "  quit       → 退出"
-            )
+            await _send_text(JUMP_HELP_TEXT)
             controller.keep(timeout=180, reset_timeout=True)
             return
 
@@ -1258,7 +1279,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
         # ══════════════════════════════════════════════════════════
         if s == 'difficulty':
             if lower in ('help', '?'):
-                await _send_text(_JUMP_STEP_TEXT['difficulty'])
+                await _send_text(render_jump_step('difficulty', state))
                 controller.keep(timeout=180, reset_timeout=True)
                 return
 
@@ -1274,7 +1295,12 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                     controller.keep(timeout=180, reset_timeout=True)
                     return
 
-            await _send_text('❓ 请输入数字 0-7 选择难度')
+            if await _handle_natural_language_intent(
+                controller, await _parse_natural_language_intent(text)
+            ):
+                return
+
+            await _send_text('❓ 请输入数字 0-8，或直接说出你的需求，例如「来一道提高+/省选− 的 DP 题」。')
             controller.keep(timeout=180, reset_timeout=True)
             return
 
@@ -1317,7 +1343,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                         state['tags'].append(tag_name)
                         await _send_text(f'✅ 已添加：「{tag_name}」（未匹配到精确标签）')
 
-                await _send_text(f'当前已选标签：{_jump_tags_str(state)}')
+                await _send_text(render_selected_tags_update(state))
                 controller.keep(timeout=180, reset_timeout=True)
                 return
 
@@ -1329,21 +1355,25 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                     await _send_text(f'✅ 已移除：「{tag_name}」')
                 else:
                     await _send_text(f'「{tag_name}」不在已选列表中')
-                await _send_text(f'当前已选标签：{_jump_tags_str(state)}')
+                await _send_text(render_selected_tags_update(state))
                 controller.keep(timeout=180, reset_timeout=True)
                 return
 
             if lower in ('list', '状态', '当前'):
-                await _send_text(_JUMP_STEP_TEXT['tags'].format(
-                    current_tags=_jump_tags_str(state) or '（无）'
-                ))
+                await _send_text(render_jump_step('tags', state))
                 controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            if await _handle_natural_language_intent(
+                controller, await _parse_natural_language_intent(text)
+            ):
                 return
 
             await _send_text(
                 f'❓ 无法理解输入\n'
-                f'当前已选标签：{_jump_tags_str(state)}\n\n'
-                f'输入 +标签 添加，-标签 移除，done 确认'
+                f'{render_selected_tags_update(state)}\n\n'
+                f'输入 +标签 添加，-标签 移除，done 确认，\n'
+                f'也可以直接说「来一道图论最短路题」。'
             )
             controller.keep(timeout=180, reset_timeout=True)
             return
@@ -1369,13 +1399,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                 return
 
             if state['total'] == 0:
-                await _send_text(
-                    f'🔍 未找到符合条件的题目\n'
-                    f'难度：{_jump_diff_str(state)} | 标签：{_jump_tags_str(state)}\n\n'
-                    f'输入 back-tags 返回修改标签\n'
-                    f'输入 back-diff 重新开始所有筛选\n'
-                    f'输入 quit 退出'
-                )
+                await _send_text(render_no_result_prompt(state))
                 step[0] = 'result'
             else:
                 step[0] = 'result'
@@ -1395,7 +1419,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                     state['total'] = 0
                     step[0] = 'difficulty'
                     await _send_text('← 重置所有条件，返回难度筛选步骤')
-                    await _send_text(_JUMP_STEP_TEXT['difficulty'])
+                    await _send_text(render_jump_step('difficulty', state))
                     controller.keep(timeout=180, reset_timeout=True)
                     return
                 await _send_text('输入 back-diff 重新开始，quit 退出')
@@ -1417,7 +1441,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                 state['total'] = 0
                 step[0] = 'difficulty'
                 await _send_text('← 重置所有条件，返回难度筛选步骤')
-                await _send_text(_JUMP_STEP_TEXT['difficulty'])
+                await _send_text(render_jump_step('difficulty', state))
                 controller.keep(timeout=180, reset_timeout=True)
                 return
 
@@ -1440,6 +1464,11 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                     await _send_text(f'⚠️ 序号超出范围，请输入 1-{state["total"]}')
                     controller.keep(timeout=180, reset_timeout=True)
                     return
+
+            if await _handle_natural_language_intent(
+                controller, await _parse_natural_language_intent(text)
+            ):
+                return
 
             await _show_current_step()
             controller.keep(timeout=180, reset_timeout=True)
@@ -1485,7 +1514,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                 state['showed_md'] = False
                 step[0] = 'difficulty'
                 await _send_text('← 重置所有条件，返回难度筛选步骤')
-                await _send_text(_JUMP_STEP_TEXT['difficulty'])
+                await _send_text(render_jump_step('difficulty', state))
                 controller.keep(timeout=180, reset_timeout=True)
                 return
 
@@ -1494,13 +1523,18 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                 controller.stop()
                 return
 
+            if await _handle_natural_language_intent(
+                controller, await _parse_natural_language_intent(text)
+            ):
+                return
+
             # 其他输入 - 切换回 result 状态继续处理
             step[0] = 'result'
             controller.keep(timeout=180, reset_timeout=True)
             return
 
     try:
-        await _send_text(_JUMP_STEP_TEXT['difficulty'])
+        await _send_text(render_jump_step('difficulty', state))
         await jump_waiter(event)
     except TimeoutError:
         yield event.plain_result('⏰ 会话超时（3分钟无操作），已退出题库跳转')
@@ -1746,7 +1780,7 @@ if _ASTRBOT:
                 if not Path(cfile).exists():
                     yield event.plain_result("请先用 /luogu bind 绑定账号")
                     return
-                async for result in _jump_session_flow(event, cfile):
+                async for result in _jump_session_flow(self.context, event, cfile):
                     yield result
                 return
 

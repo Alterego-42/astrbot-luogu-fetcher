@@ -12,7 +12,7 @@ import json
 import time
 import random
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
 try:
@@ -877,8 +877,10 @@ class ProblemFetcher:
         获取题目 Markdown 内容。
 
         优先方案：
-        1. 点击页面上的「复制 Markdown」按钮
-        2. 失败则尝试 API（需要登录态）
+        1. 解析页面内嵌的 `#lentille-context` JSON
+        2. 解析页面中隐藏的 `.lfe-marked-original` 原文块
+        3. 尝试旧的复制按钮 / API 方案
+        4. 最后兜底提取当前页面文本
 
         Args:
             pid: 题目编号（如 P1047）。若为 None，则从当前页面 URL 提取。
@@ -898,19 +900,197 @@ class ProblemFetcher:
             if not pid:
                 return '（未能确定题目编号）'
 
-            # 方案1：尝试点击「复制 Markdown」按钮
+            # 新主路径：页面内嵌 JSON，结构稳定且不依赖剪贴板权限
+            md_content = self._extract_markdown_from_lentille_context()
+            if md_content and len(md_content) > 20:
+                logger.info(f'[Luogu] 通过 lentille-context 获取 Markdown，长度: {len(md_content)}')
+                return md_content
+
+            # 次优路径：页面隐藏的原始 Markdown 块
+            md_content = self._extract_markdown_from_hidden_original()
+            if md_content and len(md_content) > 20:
+                logger.info(f'[Luogu] 通过隐藏原文块获取 Markdown，长度: {len(md_content)}')
+                return md_content
+
+            # 旧路径：尝试点击「复制 Markdown」按钮
             md_content = self._try_click_copy_markdown_button()
             if md_content and len(md_content) > 20:
                 logger.info(f'[Luogu] 通过复制按钮获取 Markdown，长度: {len(md_content)}')
                 return md_content
 
-            # 方案2：尝试 API（需要登录态）
-            logger.info('[Luogu] 复制按钮失败，尝试 API')
+            # 旧接口兜底：保留用于兼容未来页面调整
+            logger.info('[Luogu] 页面内嵌内容未命中，尝试旧 API 兜底')
             return self._fetch_markdown_via_api(pid)
 
         except Exception as e:
             logger.error(f'[Luogu] 获取 Markdown 失败: {e}')
             return f'（获取题目内容失败: {e}）'
+
+    def _extract_markdown_from_lentille_context(self) -> Optional[str]:
+        """从页面内嵌的 `#lentille-context` JSON 中重建 Markdown。"""
+        try:
+            payload = self.page.evaluate("""
+                () => {
+                    const script = document.querySelector('#lentille-context');
+                    if (!script) {
+                        return { error: 'missing lentille-context' };
+                    }
+                    try {
+                        const data = JSON.parse(script.textContent || '{}');
+                        const problem = (((data || {}).data || {}).problem || {});
+                        return {
+                            pid: problem.pid || '',
+                            title: problem.title || '',
+                            contenu: problem.contenu || {},
+                            samples: problem.samples || [],
+                            translation: problem.translation || null,
+                        };
+                    } catch (error) {
+                        return { error: String(error) };
+                    }
+                }
+            """)
+        except Exception as e:
+            logger.warning(f'[Luogu] 读取 lentille-context 失败: {e}')
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+        if payload.get('error'):
+            logger.info(f'[Luogu] lentille-context 不可用: {payload["error"]}')
+            return None
+
+        contenu = payload.get('contenu')
+        samples = payload.get('samples')
+        translation = payload.get('translation')
+
+        sections: List[str] = []
+        ordered_fields = [
+            ('background', '题目背景'),
+            ('description', '题目描述'),
+            ('formatI', '输入格式'),
+            ('formatO', '输出格式'),
+            ('hint', '说明/提示'),
+        ]
+
+        for field_name, heading in ordered_fields:
+            raw = ''
+            if isinstance(contenu, dict):
+                raw = str(contenu.get(field_name) or '').strip()
+            if raw:
+                sections.append(f'{heading}\n\n{raw}')
+
+        sample_section = self._build_samples_markdown(samples)
+        if sample_section:
+            insert_at = 4 if len(sections) >= 4 else len(sections)
+            sections.insert(insert_at, sample_section)
+
+        translation_section = self._build_translation_markdown(translation)
+        if translation_section:
+            sections.append(translation_section)
+
+        markdown = '\n\n'.join(section for section in sections if section.strip()).strip()
+        return markdown or None
+
+    def _build_samples_markdown(self, samples: Any) -> Optional[str]:
+        """把 `problem.samples` 结构化为 Markdown 样例段。"""
+        if not isinstance(samples, list) or not samples:
+            return None
+
+        blocks: List[str] = ['输入输出样例']
+        for index, sample in enumerate(samples, start=1):
+            sample_input = ''
+            sample_output = ''
+
+            if isinstance(sample, (list, tuple)):
+                if len(sample) > 0:
+                    sample_input = str(sample[0] or '')
+                if len(sample) > 1:
+                    sample_output = str(sample[1] or '')
+            elif isinstance(sample, dict):
+                sample_input = str(
+                    sample.get('input')
+                    or sample.get('in')
+                    or sample.get('stdin')
+                    or ''
+                )
+                sample_output = str(
+                    sample.get('output')
+                    or sample.get('out')
+                    or sample.get('stdout')
+                    or ''
+                )
+
+            blocks.append(f'输入 #{index}\n\n```plain\n{sample_input}\n```')
+            blocks.append(f'输出 #{index}\n\n```plain\n{sample_output}\n```')
+
+        return '\n\n'.join(blocks).strip()
+
+    def _build_translation_markdown(self, translation: Any) -> Optional[str]:
+        """兼容存在题面翻译时的 Markdown 输出。"""
+        if not isinstance(translation, dict):
+            return None
+
+        text_candidates = []
+        for key in ('background', 'description', 'content', 'text'):
+            value = str(translation.get(key) or '').strip()
+            if value:
+                text_candidates.append(value)
+
+        if not text_candidates:
+            return None
+        return '题面翻译\n\n' + '\n\n'.join(text_candidates)
+
+    def _extract_markdown_from_hidden_original(self) -> Optional[str]:
+        """从页面中隐藏的 `.lfe-marked-original` 代码块提取原始 Markdown。"""
+        try:
+            result = self.page.evaluate("""
+                () => {
+                    const container = document.querySelector('.l-card.problem');
+                    if (!container) return [];
+
+                    const sections = [];
+                    let currentHeading = '';
+                    for (const child of Array.from(container.children)) {
+                        const tag = (child.tagName || '').toUpperCase();
+                        if (tag === 'H2') {
+                            currentHeading = (child.textContent || '').trim();
+                            continue;
+                        }
+
+                        const original = child.querySelector('.lfe-marked-original');
+                        if (original) {
+                            sections.push({
+                                heading: currentHeading,
+                                text: (original.textContent || '').trim(),
+                            });
+                        }
+                    }
+                    return sections;
+                }
+            """)
+        except Exception as e:
+            logger.warning(f'[Luogu] 读取隐藏原文块失败: {e}')
+            return None
+
+        if not isinstance(result, list):
+            return None
+
+        parts = []
+        for section in result:
+            if not isinstance(section, dict):
+                continue
+            heading = str(section.get('heading') or '').strip()
+            text = str(section.get('text') or '').strip()
+            if not text:
+                continue
+            if heading:
+                parts.append(f'{heading}\n\n{text}')
+            else:
+                parts.append(text)
+
+        markdown = '\n\n'.join(parts).strip()
+        return markdown or None
 
     def _try_click_copy_markdown_button(self) -> Optional[str]:
         """点击页面上的「复制 Markdown」按钮"""
@@ -932,6 +1112,8 @@ class ProblemFetcher:
                     return 'not found';
                 }
             """)
+            if click_result != 'clicked':
+                logger.info(f'[Luogu] 复制 Markdown 按钮未命中: {click_result}')
             if click_result == 'clicked':
                 time.sleep(0.3)
                 # 从页面元素提取 Markdown 内容
@@ -1028,7 +1210,12 @@ class ProblemFetcher:
                     const text = await resp.text();
                     // 检查是否返回了 HTML（未登录或被拦截）
                     if (!text.startsWith('{{')) {{
-                        return {{ error: '非JSON响应，可能未登录', raw: text.substring(0, 200) }};
+                        return {{
+                            error: '非JSON响应，旧接口可能失效或返回 HTML',
+                            status: resp.status,
+                            contentType: resp.headers.get('content-type'),
+                            raw: text.substring(0, 200)
+                        }};
                     }}
                     return JSON.parse(text);
                 }} catch(e) {{
@@ -1039,7 +1226,12 @@ class ProblemFetcher:
 
         if isinstance(result, dict):
             if result.get('error'):
-                logger.warning(f'[Luogu] API 请求失败: {result["error"]}')
+                logger.warning(
+                    '[Luogu] API 请求失败，回退页面文本提取: '
+                    f'error={result.get("error")}, '
+                    f'status={result.get("status")}, '
+                    f'contentType={result.get("contentType")}'
+                )
                 return self._extract_markdown_fallback()
 
             # 尝试从 JSON 中提取 Markdown
