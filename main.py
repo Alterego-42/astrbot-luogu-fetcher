@@ -67,6 +67,7 @@ from luogu.jump_session import (
     render_problem_footer,
     split_markdown_chunks,
 )
+from luogu.markdown_image import render_markdown_to_image
 from luogu.nl_jump import parse_jump_natural_language
 
 # ── 常量 ──────────────────────────────────────────────────────
@@ -943,6 +944,20 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
             return matched[0], True
         return tag_name.strip(), False
 
+    def _normalize_tag_list(tags: Any) -> list[str]:
+        normalized: list[str] = []
+        seen = set()
+        for raw in tags or []:
+            tag_name = str(raw).strip()
+            if not tag_name:
+                continue
+            tag_full, _matched = _normalize_tag_input(tag_name)
+            if tag_full in seen:
+                continue
+            normalized.append(tag_full)
+            seen.add(tag_full)
+        return normalized
+
     def _resolve_selected_tag(tag_name: str) -> Optional[str]:
         raw = tag_name.strip()
         if not raw:
@@ -1102,12 +1117,10 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
                 controller.keep(timeout=180, reset_timeout=True)
                 return True
 
-            if intent.get('difficulty') is not None:
-                state['difficulty'] = intent['difficulty'] or None
-            if intent.get('tags'):
-                state['tags'] = intent['tags']
-            if intent.get('keyword'):
-                state['keyword'] = intent['keyword']
+            if intent_has_filters:
+                state['difficulty'] = intent.get('difficulty') or None
+                state['tags'] = _normalize_tag_list(intent.get('tags'))
+                state['keyword'] = intent.get('keyword') or None
 
             await _send_text('🔍 正在按你的描述筛题，请稍候...')
             ok = await _apply_filters()
@@ -1237,6 +1250,7 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
             # 保存当前 PID 到 state，供「看图」指令使用
             state['current_pid'] = pid
             state['current_md'] = md_content
+            state['current_title'] = detail.get('title', '')
 
             # ── 题目摘要（头部信息） ──
             header = render_problem_header(pid, detail)
@@ -1307,8 +1321,7 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
 
     async def _render_and_send_screenshot():
         """
-        渲染 Markdown 为图片并发送。
-        使用题目的 HTML 内容直接截图。
+        优先把 Markdown 题面渲染为图片，失败时再回退到网页截图。
         """
         nonlocal fetcher
         try:
@@ -1317,15 +1330,32 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
                 await _send_text('❌ 没有可渲染的题目')
                 return
 
-            def _do_screenshot():
-                # 重新访问题目页面并截图
-                fetcher.page.goto(f'https://www.luogu.com.cn/problem/{pid}', timeout=20000)
-                fetcher.page.wait_for_load_state('domcontentloaded', timeout=15000)
-                import time as _time; _time.sleep(1.5)
-                img_bytes = fetcher.screenshot_problem(pid)
-                return img_bytes
+            img_bytes = None
+            md_content = state.get('current_md')
+            if md_content:
+                try:
+                    title = pid
+                    if state.get('current_title'):
+                        title = f'{pid}  {state["current_title"]}'
+                    img_bytes = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: render_markdown_to_image(md_content, title=title),
+                    )
+                except Exception as render_err:
+                    logger.warning(f'[Luogu jump] Markdown 图片渲染失败，回退网页截图: {render_err}')
 
-            img_bytes = await _run_in_pw(_do_screenshot)
+            if not img_bytes:
+                await _send_text('⚠️ Markdown 渲染失败，改用网页截图兜底。')
+
+                def _do_screenshot():
+                    # 重新访问题目页面并截图
+                    fetcher.page.goto(f'https://www.luogu.com.cn/problem/{pid}', timeout=20000)
+                    fetcher.page.wait_for_load_state('domcontentloaded', timeout=15000)
+                    import time as _time; _time.sleep(1.5)
+                    return fetcher.screenshot_problem(pid)
+
+                img_bytes = await _run_in_pw(_do_screenshot)
+
             img_path = _ensure_image_path(img_bytes) if img_bytes else None
 
             if img_path:

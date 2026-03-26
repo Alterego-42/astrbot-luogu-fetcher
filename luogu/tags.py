@@ -203,6 +203,11 @@ def _char_seq_match(input_s: str, tag_s: str) -> bool:
     return i == len(input_s)
 
 
+def _normalize_tag_text(text: str) -> str:
+    """归一化标签文本，提升 `状压DP` / `状压 DP` 这类写法的匹配稳定性。"""
+    return ''.join(ch.lower() for ch in text if ch.isalnum())
+
+
 def fuzzy_match_tag(input_tag: str) -> list:
     """
     模糊匹配标签（搜索算法标签 + 来源标签）。
@@ -214,6 +219,7 @@ def fuzzy_match_tag(input_tag: str) -> list:
         匹配到的标签列表（最多10个）
     """
     input_lower = input_tag.lower()
+    input_compact = _normalize_tag_text(input_tag)
     matches = []
     seq_matches = []   # 字符顺序匹配（优先级低）
 
@@ -224,8 +230,13 @@ def fuzzy_match_tag(input_tag: str) -> list:
         if input_tag == tag:
             return [tag]
         tag_lower = tag.lower()
+        tag_compact = _normalize_tag_text(tag)
         # 大小写不敏感子串匹配
         if input_lower in tag_lower:
+            matches.append(tag)
+            continue
+        # 忽略空格和符号后的子串/精确匹配
+        if input_compact and (input_compact == tag_compact or input_compact in tag_compact):
             matches.append(tag)
             continue
         # 字符顺序匹配（支持中文缩写：动规 → 动态规划）
