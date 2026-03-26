@@ -162,6 +162,53 @@ async def _run_async(cookies_file: str, qq_id: str, task_fn, **kwargs) -> Any:
     )
 
 
+def _check_cookie_valid(cookies_file: str) -> bool:
+    """
+    检测 cookie 是否有效。
+    通过调用洛谷 API 检查是否返回登录用户数据。
+    返回 True 表示有效，False 表示已过期。
+    """
+    import requests
+
+    if not Path(cookies_file).exists():
+        return False
+
+    try:
+        with open(cookies_file, 'r', encoding='utf-8') as f:
+            cookie_data = json.load(f)
+
+        # 转换为 requests 格式
+        cookies = {}
+        for c in cookie_data.get('cookies', []):
+            cookies[c['name']] = c['value']
+
+        if not cookies:
+            return False
+
+        # 调用 API 检测
+        resp = requests.get(
+            'https://www.luogu.com.cn/api/visitor/user',
+            cookies=cookies,
+            headers={
+                'Accept': 'application/json',
+                'Referer': 'https://www.luogu.com.cn/',
+            },
+            timeout=10
+        )
+
+        if resp.status_code != 200:
+            return False
+
+        data = resp.json()
+        # 如果返回了用户数据，说明 cookie 有效
+        if data.get('code') == 200 and data.get('user'):
+            return True
+        return False
+    except Exception as e:
+        logger.warning(f'[Luogu] Cookie 检测失败: {e}')
+        return False
+
+
 # ════════════════════════════════════════════════════════════════
 # 各功能的实际执行函数（同步，在线程中运行）
 # ════════════════════════════════════════════════════════════════
@@ -797,6 +844,19 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
     """
     import astrbot.api.message_components as Comp
     _cookies = cookies_file
+
+    # --- 检测 cookie 是否有效 ---
+    logger.info(f'[Luogu jump] 检测 cookie 有效性: {cookies_file}')
+    cookie_valid = await asyncio.get_event_loop().run_in_executor(
+        None, _check_cookie_valid, cookies_file
+    )
+    if not cookie_valid:
+        logger.warning('[Luogu jump] Cookie 已过期，提示用户重新绑定')
+        yield event.plain_result(
+            '⚠️ 登录状态已失效，请重新绑定账号后继续。\n'
+            '使用方法：/luogu bind <手机号> <密码>'
+        )
+        return
 
     # --- 专用单线程 executor（所有 Playwright 操作必须在同一线程） ---
     _pw_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='pw_jump')
