@@ -1084,19 +1084,28 @@ class ProblemFetcher:
         return self._extract_markdown_fallback()
 
     def _extract_markdown_fallback(self) -> str:
-        """兜底：从当前页面 HTML 提取可读文本"""
+        """兜底：从当前页面提取题目内容"""
         try:
             md_content = self.page.evaluate("""
                 () => {
-                    const contentEl = document.querySelector('.problem-content')
-                        || document.querySelector('.lg-content')
-                        || document.querySelector('.main-container');
-                    if (!contentEl) return '题目内容未找到';
-                    return contentEl.innerText || contentEl.textContent || '内容为空';
+                    const bodyText = document.body.innerText;
+                    // 找到题目内容开始的位置
+                    const startMarkers = ['题目背景', '题目描述', '输入格式', '输出格式', '输入输出样例', '说明/提示'];
+                    let startIdx = -1;
+                    for (const marker of startMarkers) {
+                        const idx = bodyText.indexOf(marker);
+                        if (idx !== -1 && (startIdx === -1 || idx < startIdx)) {
+                            startIdx = idx;
+                        }
+                    }
+                    if (startIdx !== -1) {
+                        return bodyText.substring(startIdx);
+                    }
+                    return bodyText;
                 }
             """)
             if md_content and len(md_content) > 20:
-                return f'[注：以下为网页提取文本，非原始 Markdown]\n\n{md_content}'
+                return md_content
             return '（未能获取题目内容）'
         except Exception as e:
             return f'（内容提取失败: {e}）'

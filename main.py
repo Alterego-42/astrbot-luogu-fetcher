@@ -958,8 +958,8 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
 
             # ── 构建合并转发节点 ──
             # 将 Markdown 内容按 1500 字分段，每段一个 Node
-            # 使用 bot 的 get_sender_id() 获取发送者 ID，使合并转发显示为 bot 发送
-            sender_id = event.get_sender_id() or '10000'
+            # 使用 event.message_obj.self_id 获取 bot 自己的 ID，使合并转发显示为 bot 发送
+            sender_id = event.message_obj.self_id if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'self_id') else '10000'
             sender_name = '洛谷助手'
 
             nodes = []
