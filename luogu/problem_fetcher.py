@@ -241,6 +241,11 @@ class ProblemFetcher:
             # 动态检测实际每页题目数量
             page_size = self._detect_page_size()
 
+            # 边界保护：处理 index 超出范围的情况
+            # 如果 index > 总题目数，取最后一题
+            actual_index = min(index, page_size)  # 临时用 page_size 估算，实际点击时会检测
+            logger.info(f'[Luogu] 目标题目: 第{index}题, 估算每页{page_size}题')
+
             # 计算目标页码
             page_num = (index - 1) // page_size + 1
             pos_in_page = (index - 1) % page_size + 1
@@ -250,7 +255,12 @@ class ProblemFetcher:
             # 跳转到目标页
             if page_num > 1:
                 self._go_to_page(page_num)
-                time.sleep(1)
+                time.sleep(1.5)
+                # 跳转后重新检测 page_size（末页可能不同）
+                page_size = self._detect_page_size()
+                # 重新计算位置
+                pos_in_page = (index - 1) % page_size + 1
+                logger.info(f'[Luogu] 跳转后重新检测: 每页{page_size}题，第{pos_in_page}个位置')
 
             # 在当前页定位到目标题目
             pid = self._click_problem_at_position(pos_in_page)
@@ -891,18 +901,24 @@ class ProblemFetcher:
             api_url = f'https://www.luogu.com.cn/problem/{pid}?_contentOnly=1'
             logger.info(f'[Luogu] 通过 API 获取题目 Markdown: {api_url}')
 
-            # 在当前页面执行 fetch 请求，利用已有的登录 cookie
+            # 使用绝对 URL 并添加必要的请求头
             result = self.page.evaluate(f"""
                 async () => {{
                     try {{
-                        const resp = await fetch('/problem/{pid}?_contentOnly=1', {{
+                        const resp = await fetch('{api_url}', {{
                             headers: {{
                                 'x-luogu-type': 'content-only',
-                                'accept': 'application/json'
-                            }}
+                                'accept': 'application/json',
+                                'referer': 'https://www.luogu.com.cn/problem/{pid}'
+                            }},
+                            credentials: 'include'
                         }});
-                        const data = await resp.json();
-                        return data;
+                        const text = await resp.text();
+                        // 检查是否返回了 HTML（未登录或被拦截）
+                        if (!text.startsWith('{{')) {{
+                            return {{ error: '非JSON响应，可能未登录', raw: text.substring(0, 200) }};
+                        }}
+                        return JSON.parse(text);
                     }} catch(e) {{
                         return {{ error: e.toString() }};
                     }}

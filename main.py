@@ -713,7 +713,7 @@ def _build_problem_html(detail: dict) -> str:
 _JUMP_STEP_TEXT = {
     'difficulty': (
         "━━━ Step 1：难度筛选 ━━━\n\n"
-        "请选择题目难度（输入数字 0-8）：\n\n"
+        "请选择题目难度（输入数字 0-7）：\n\n"
         "  0. 跳过（不限难度）\n"
         "  1. 暂无评定\n"
         "  2. 入门\n"
@@ -721,8 +721,7 @@ _JUMP_STEP_TEXT = {
         "  4. 普及/提高−\n"
         "  5. 普及+/提高\n"
         "  6. 提高+/省选−\n"
-        "  7. 省选/NOI−\n"
-        "  8. NOI/NOI+/CTSC\n\n"
+        "  7. 省选/NOI−\n\n"
         "直接发送数字即可，如：2"
     ),
     'tags': (
@@ -1106,7 +1105,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
                     controller.keep(timeout=180, reset_timeout=True)
                     return
 
-            await _send_text('❓ 请输入数字 0-8 选择难度')
+            await _send_text('❓ 请输入数字 0-7 选择难度')
             controller.keep(timeout=180, reset_timeout=True)
             return
 
