@@ -1073,7 +1073,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
         if lower in ('help', '帮助', '?'):
             await _send_text(
                 "📖 题库跳转帮助：\n\n"
-                "  数字 0-8   → 选择难度\n"
+                "  数字 0-7   → 选择难度\n"
                 "  +标签      → 添加标签（支持模糊匹配）\n"
                 "  -标签      → 移除标签\n"
                 "  done       → 确认标签，进入下一步\n"
@@ -1097,7 +1097,7 @@ async def _jump_session_flow(event: AstrMessageEvent, cookies_file: str):
 
             if text.isdigit():
                 d = int(text)
-                if 0 <= d <= 8:
+                if 0 <= d <= 7:
                     state['difficulty'] = d if d > 0 else None
                     diff_name = DIFFICULTY_NAMES[d] if d > 0 else '不限'
                     await _send_text(f'✅ 已选择难度：{diff_name}')

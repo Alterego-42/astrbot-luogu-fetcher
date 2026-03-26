@@ -542,55 +542,65 @@ class ProblemFetcher:
         """
         在弹窗中查找并点击指定标签，必要时切换 Tab。
 
-        Tab 列表：算法、来源、时间、区域、特殊题目
-        年份标签（2020/2021 等）在"时间" Tab
-        省份/城市标签在"区域" Tab
+        核心问题：不能用 `parent.locator(selector)` 来找 Tab 按钮，
+        因为它会匹配到页面其他区域的同名元素（如题库列表的表头按钮）。
+
+        正确策略：
+        1. 先在当前已显示的 .toggle-tag 中查找
+        2. 用 JS 在弹窗内搜索标签元素（限制在弹窗 DOM 子树内）
+        3. 如果未找到，用 JS 找 Tab 按钮并切换到对应 Tab
         """
-        # 先在当前已显示的 .toggle-tag 中查找
+        # Step 1: 先在当前已显示的 .toggle-tag 中查找
         if self._try_click_tag(tag_modal, tag):
             return True
 
-        # 获取所有 Tab 按钮
-        tab_buttons = tag_modal.locator('.tab-button, .tab-item, [role="tab"], .tabs .item')
-        if tab_buttons.count() == 0:
-            # 尝试其他选择器
-            tab_buttons = self.page.locator('.l-card .tab-button, .l-card [class*="tab"] button, .l-card [class*="tab"] span')
+        # Step 2: 用 JS 在弹窗内搜索标签（仅弹窗 DOM 子树内）
+        found = self._js_find_and_click_tag_in_modal(tag)
+        if found:
+            return True
 
-        tab_count = tab_buttons.count()
-        logger.info(f'[Luogu] 弹窗 Tab 数量: {tab_count}')
+        # Step 3: 仍未找到 → 切换 Tab 后重试
+        # 用 JS 找到所有可点击的 Tab 按钮
+        tab_info_list = self.page.evaluate("""
+            () => {
+                const modal = document.querySelector('.l-card');
+                if (!modal) return [];
+                const tabs = [];
+                // 查找所有可能是 Tab 的按钮/span 元素
+                const buttons = modal.querySelectorAll('button, [role="tab"], span, div');
+                const seen = new Set();
+                for (const el of buttons) {
+                    const text = el.innerText ? el.innerText.trim() : '';
+                    // 只保留短文本（Tab 标签通常 2-6 个字符）
+                    if (text && text.length <= 8 && !seen.has(text)) {
+                        seen.add(text);
+                        tabs.push({ text, el: el });
+                    }
+                }
+                return tabs.map(t => t.text);
+            }
+        """)
 
-        if tab_count > 0:
-            for i in range(tab_count):
-                try:
-                    btn = tab_buttons.nth(i)
-                    tab_text = btn.inner_text().strip()
-                    # 跳过已尝试过的 Tab（第一个默认已试过）
-                    if i == 0:
-                        continue
-                    logger.info(f'[Luogu] 切换到 Tab[{i}]: {tab_text}')
-                    btn.click(force=True)
-                    time.sleep(0.5)
-                    if self._try_click_tag(tag_modal, tag):
-                        return True
-                except Exception as e:
-                    logger.debug(f'[Luogu] 切换 Tab[{i}] 失败: {e}')
+        if not tab_info_list:
+            logger.warning(f'[Luogu] 未找到任何 Tab 按钮')
+            return False
 
-        # 最后尝试：通过 JS 查找弹窗内所有文本匹配的元素
-        try:
-            found = self.page.evaluate(f"""
+        logger.info(f'[Luogu] 弹窗 Tab 列表: {tab_info_list}')
+
+        # 遍历所有发现的 Tab 按钮
+        for tab_text in tab_info_list:
+            if not tab_text:  # 跳过空文本
+                continue
+            logger.info(f'[Luogu] 尝试切换到 Tab: "{tab_text}"')
+            # 用 JS 点击这个 Tab
+            clicked = self.page.evaluate(f"""
                 () => {{
                     const modal = document.querySelector('.l-card');
                     if (!modal) return false;
                     const allEls = modal.querySelectorAll('*');
                     for (const el of allEls) {{
-                        if (el.children.length === 0 && el.innerText && el.innerText.trim() === '{tag}') {{
-                            el.click();
-                            return true;
-                        }}
-                    }}
-                    // 模糊匹配
-                    for (const el of allEls) {{
-                        if (el.children.length === 0 && el.innerText && el.innerText.includes('{tag}')) {{
+                        const text = (el.innerText || '').trim();
+                        if (text === '{tab_text}' && (el.tagName === 'BUTTON' || el.getAttribute('role') === 'tab' || el.className.includes('tab'))) {{
                             el.click();
                             return true;
                         }}
@@ -598,13 +608,52 @@ class ProblemFetcher:
                     return false;
                 }}
             """)
-            if found:
-                logger.info(f'[Luogu] JS 模糊匹配点击标签: {tag}')
-                time.sleep(0.3)
-                return True
-        except Exception as e:
-            logger.debug(f'[Luogu] JS 查找标签失败: {e}')
+            if clicked:
+                time.sleep(0.8)
+                # 在当前 Tab 中查找标签
+                if self._try_click_tag(tag_modal, tag):
+                    return True
+                if self._js_find_and_click_tag_in_modal(tag):
+                    return True
 
+        return False
+
+    def _js_find_and_click_tag_in_modal(self, tag: str) -> bool:
+        """
+        用 JS 在弹窗内搜索并点击标签元素。
+        仅搜索弹窗 DOM 子树（.l-card），不污染页面其他区域。
+        策略：精确匹配 → 模糊匹配。
+        """
+        for strategy in ('exact', 'fuzzy'):
+            try:
+                cmp = '===' if strategy == 'exact' else 'includes'
+                found = self.page.evaluate(f"""
+                    () => {{
+                        const modal = document.querySelector('.l-card');
+                        if (!modal) return false;
+                        const allEls = modal.querySelectorAll('*');
+                        for (const el of allEls) {{
+                            const text = (el.innerText || '').trim();
+                            let match = false;
+                            if ('{strategy}' === 'exact') {{
+                                match = text === '{tag}';
+                            }} else {{
+                                match = text.includes('{tag}');
+                            }}
+                            if (match) {{
+                                el.click();
+                                return true;
+                            }}
+                        }}
+                        return false;
+                    }}
+                """)
+                if found:
+                    logger.info(f'[Luogu] JS {"精确" if strategy == "exact" else "模糊"}匹配点击标签: {tag}')
+                    time.sleep(0.3)
+                    return True
+            except Exception as e:
+                logger.debug(f'[Luogu] JS 查找标签（第{strategy}策略）失败: {e}')
         return False
 
     def _try_click_tag(self, tag_modal, tag: str) -> bool:
