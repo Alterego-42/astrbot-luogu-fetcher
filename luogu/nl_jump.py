@@ -37,7 +37,7 @@ def _sanitize_intent(intent: Dict[str, Any]) -> Dict[str, Any]:
     """把模型输出收敛为受控字段。"""
     action = str(intent.get('action') or 'unknown').strip().lower()
     if action not in {
-        'search', 'random', 'select', 'show_image',
+        'search', 'random', 'select', 'show_image', 'show_screenshot',
         'back', 'restart', 'quit', 'help', 'unknown',
     }:
         action = 'unknown'
@@ -94,7 +94,7 @@ def build_jump_parse_prompt(user_text: str, hot_tags: List[str]) -> str:
 只输出一个 JSON 对象，不要输出任何额外解释。
 
 字段定义：
-- action: search | random | select | show_image | back | restart | quit | help | unknown
+ - action: search | random | select | show_image | show_screenshot | back | restart | quit | help | unknown
 - difficulty: 0-8 或 null
   - 0 = 不限
   - 1 = 暂无评定
@@ -114,7 +114,7 @@ def build_jump_parse_prompt(user_text: str, hot_tags: List[str]) -> str:
 
 规则：
 1. 如果用户想“随机来一道”，action = random。
-2. 如果用户想看当前题面的图片，action = show_image。
+2. 如果用户想看当前题面的渲染图，action = show_image；如果明确说“截图”“官网截图”“原网页截图”，action = show_screenshot。
 3. 如果用户要返回上一步，action = back；如果要从头开始，action = restart。
 4. 如果用户只是表达筛题条件，action = search。
 5. 只有当用户明确说“第 3 题”“第3道”这类时，action = select 且填写 index。

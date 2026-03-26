@@ -1084,14 +1084,18 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
             controller.keep(timeout=180, reset_timeout=True)
             return True
 
-        if action == 'show_image':
-            if step[0] != 'waiting_md' or not state.get('current_pid'):
+        if action in ('show_image', 'show_screenshot'):
+            if step[0] not in ('waiting_md', 'result') or not state.get('current_pid'):
                 await _send_text('先选出一道题，我再帮你渲染题面图片。')
                 controller.keep(timeout=180, reset_timeout=True)
                 return True
-            await _send_text('🖼️ 正在渲染题面图片，请稍候...')
-            await _render_and_send_screenshot()
-            step[0] = 'result'
+            if action == 'show_screenshot':
+                await _send_text('📸 正在截取洛谷网页截图，请稍候...')
+                await _render_and_send_problem_image(mode='screenshot')
+            else:
+                await _send_text('🖼️ 正在渲染题面图片，请稍候...')
+                await _render_and_send_problem_image(mode='rendered')
+            step[0] = 'waiting_md'
             controller.keep(timeout=180, reset_timeout=True)
             return True
 
@@ -1319,9 +1323,9 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
             logger.error(f'[Luogu jump] 展示题目异常: {traceback.format_exc()}')
             await _send_text(f'❌ 展示题目出错：{e}')
 
-    async def _render_and_send_screenshot():
+    async def _render_and_send_problem_image(mode: str = 'rendered'):
         """
-        优先把 Markdown 题面渲染为图片，失败时再回退到网页截图。
+        `看图` 优先发送 Markdown 渲染长图，`截图` 发送洛谷网页截图。
         """
         nonlocal fetcher
         try:
@@ -1332,7 +1336,7 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
 
             img_bytes = None
             md_content = state.get('current_md')
-            if md_content:
+            if mode == 'rendered' and md_content:
                 try:
                     title = pid
                     if state.get('current_title'):
@@ -1345,7 +1349,8 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
                     logger.warning(f'[Luogu jump] Markdown 图片渲染失败，回退网页截图: {render_err}')
 
             if not img_bytes:
-                await _send_text('⚠️ Markdown 渲染失败，改用网页截图兜底。')
+                if mode == 'rendered':
+                    await _send_text('⚠️ Markdown 渲染失败，改用网页截图兜底。')
 
                 def _do_screenshot():
                     # 重新访问题目页面并截图
@@ -1359,7 +1364,10 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
             img_path = _ensure_image_path(img_bytes) if img_bytes else None
 
             if img_path:
-                await _send_text('🖼️ 正在渲染题面图片...')
+                if mode == 'screenshot':
+                    await _send_text('📸 正在发送洛谷网页截图...')
+                else:
+                    await _send_text('🖼️ 正在渲染题面图片...')
                 await _send_img(img_path)
             else:
                 await _send_text('❌ 截图失败')
@@ -1600,14 +1608,22 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
             return
 
         # ══════════════════════════════════════════════════════════
-        # waiting_md 状态：等待用户输入「看图」指令
+        # waiting_md 状态：等待用户输入「看图」/「截图」指令
         # ══════════════════════════════════════════════════════════
         if s == 'waiting_md':
-            # 「看图」或「截图」指令 - 渲染并发送图片
-            if lower in ('看图', '截图', 'render', 'img', 'image', '图片', 'screenshot'):
+            # 「看图」指令 - 渲染 Markdown 长图
+            if lower in ('看图', 'render', 'img', 'image', '图片'):
                 await _send_text('🖼️ 正在渲染题面图片，请稍候...')
-                await _render_and_send_screenshot()
-                step[0] = 'result'
+                await _render_and_send_problem_image(mode='rendered')
+                step[0] = 'waiting_md'
+                controller.keep(timeout=180, reset_timeout=True)
+                return
+
+            # 「截图」指令 - 获取官网页面截图
+            if lower in ('截图', 'screenshot'):
+                await _send_text('📸 正在截取洛谷网页截图，请稍候...')
+                await _render_and_send_problem_image(mode='screenshot')
+                step[0] = 'waiting_md'
                 controller.keep(timeout=180, reset_timeout=True)
                 return
 
