@@ -61,6 +61,7 @@ from luogu.problem_lookup import (
     normalize_problem_lookup_tags,
     preflight_luogu_problem_tool_action,
     run_problem_async,
+    should_start_new_luogu_lookup,
     should_merge_luogu_lookup_context,
 )
 from luogu.intent_classifier import classify_luogu_routing_intent
@@ -2262,11 +2263,25 @@ if _ASTRBOT:
 
             intent = await parse_jump_natural_language(self.context, event, query, HOT_TAGS)
             if not intent:
+                fallback_keyword = None
+                if not (
+                    session
+                    and should_merge_luogu_lookup_context(query)
+                    and not should_start_new_luogu_lookup(
+                        query,
+                        action="search",
+                        difficulty=None,
+                        tags=[],
+                        keyword=query,
+                        unresolved_tags=[],
+                    )
+                ):
+                    fallback_keyword = query
                 intent = {
                     'action': 'search',
                     'difficulty': None,
                     'tags': [],
-                    'keyword': None if session and should_merge_luogu_lookup_context(query) else query,
+                    'keyword': fallback_keyword,
                     'index': None,
                     'need_clarification': False,
                     'clarification': None,

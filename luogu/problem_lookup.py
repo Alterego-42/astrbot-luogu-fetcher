@@ -87,6 +87,33 @@ _DIFFICULTY_ALIAS_MARKERS = tuple(
         "ctsc",
     )
 )
+_FRESH_SEARCH_MARKERS = tuple(
+    "".join(ch for ch in marker.lower() if ch.isalnum())
+    for marker in (
+        "来一道",
+        "来一题",
+        "来几道",
+        "找一道",
+        "找几道",
+        "选题",
+        "挑题",
+        "推荐题",
+        "推荐几题",
+        "出一道",
+        "给我一道",
+        "搜题",
+        "搜一下",
+        "查题",
+        "题目",
+        "跳一道",
+        "跳一题",
+        "跳题",
+        "整一道",
+        "整一题",
+        "做一道",
+        "做一题",
+    )
+)
 
 
 def _run_problem_sync(cookies_file: str, task_fn, **kwargs) -> Any:
@@ -191,6 +218,32 @@ def should_merge_luogu_lookup_context(query: str) -> bool:
     return any(marker in raw for marker in merge_markers)
 
 
+def should_start_new_luogu_lookup(
+    query: str,
+    *,
+    action: str,
+    difficulty: Optional[int],
+    tags: List[str],
+    keyword: Optional[str],
+    unresolved_tags: List[str],
+) -> bool:
+    raw = str(query or "").strip()
+    if not raw:
+        return False
+    if action not in ("search", ""):
+        return False
+
+    compact = _compact_text(raw)
+    if raw.startswith(("+", "-")):
+        return False
+    if any(marker in compact for marker in _FOLLOW_UP_ADD_MARKERS + _FOLLOW_UP_REMOVE_MARKERS + _FOLLOW_UP_REPLACE_MARKERS):
+        return False
+
+    has_fresh_demand = any(marker in compact for marker in _FRESH_SEARCH_MARKERS)
+    has_new_constraints = bool(tags or unresolved_tags or keyword or difficulty is not None)
+    return has_fresh_demand and has_new_constraints
+
+
 def merge_luogu_lookup_context(
     session: Optional[Dict[str, Any]],
     *,
@@ -213,6 +266,15 @@ def merge_luogu_lookup_context(
         explicit_tag = query.strip()[1:].strip()
         current["tags"], current["unresolved_tags"] = normalize_problem_lookup_tags([explicit_tag])
     if not session or action not in ("search", "") or not should_merge_luogu_lookup_context(query):
+        return current
+    if should_start_new_luogu_lookup(
+        query,
+        action=action,
+        difficulty=current["difficulty"],
+        tags=current["tags"],
+        keyword=current["keyword"],
+        unresolved_tags=current["unresolved_tags"],
+    ):
         return current
 
     text = str(query or "").strip()
