@@ -2057,7 +2057,7 @@ if _ASTRBOT:
         # ── /luogu ────────────────────────────────────────────
 
         @filter.llm_tool(name="luogu_problem_search")
-        async def luogu_problem_search(self, event: AstrMessageEvent, query: str, limit: int = 10) -> str:
+        async def luogu_problem_search(self, event: AstrMessageEvent, query: Optional[str] = None, limit: int = 10) -> str:
             """处理普通聊天里的洛谷选题与后续追问。
 
             这是普通聊天里处理洛谷选题请求的首选工具，也是后续追问的唯一入口。
@@ -2069,6 +2069,10 @@ if _ASTRBOT:
                 return "该用户还没有绑定洛谷账号，请先提醒他使用 /luogu bind 绑定后再调用这个工具。"
 
             query = (query or '').strip()
+            if not query:
+                query = (getattr(event, "message_str", "") or "").strip()
+                if query:
+                    logger.info("[Luogu LLM] recovered missing query from event.message_str")
             if not query:
                 return "缺少选题需求，请给出自然语言描述，例如“来一道提高组图论题”。"
 
