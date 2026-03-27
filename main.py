@@ -38,6 +38,7 @@ try:
     from astrbot.api.star import Context, Star, register
     from astrbot.api import logger
     from astrbot.api.message_components import Face, Plain, Node, Nodes, Image
+    from astrbot.core.agent.tool import ToolSet
     from astrbot.core.utils.session_waiter import session_waiter, SessionController
     from astrbot.core.agent.message import TextPart
     _ASTRBOT = True
@@ -1835,14 +1836,19 @@ if _ASTRBOT:
             if not _should_nudge_luogu_problem_tool(message):
                 return
 
+            tool_mgr = self.context.get_llm_tool_manager()
             self.context.activate_llm_tool("luogu_problem_search")
+            luogu_tool = tool_mgr.get_func("luogu_problem_search")
+            if luogu_tool is not None:
+                req.func_tool = ToolSet([luogu_tool])
 
             hint_marker = "[LUOGU_TOOL_POLICY]"
             hint = (
                 f"\n{hint_marker}"
                 "\n当前这条用户消息属于洛谷题库选题请求。"
                 f"\n第一步必须直接调用 `luogu_problem_search(query={message!r})`，不要跳过。"
-                "\n在本次请求里，禁止先调用 `web_search`、`fetch_url`、`astrbot_execute_shell`、`astrbot_execute_python` 这类外部搜索工具。"
+                "\n本次请求的可用工具应视为只保留 `luogu_problem_search`。"
+                "\n禁止先调用 `web_search`、`fetch_url`、`astrbot_execute_shell`、`astrbot_execute_python` 这类外部搜索工具。"
                 "\n如果用户消息里已经给了题号（如 `P7335`），也必须优先交给 `luogu_problem_search` 处理。"
                 "\n只有 `luogu_problem_search` 返回结果之后，你才能基于工具结果组织回答。"
                 "\n如果用户要看图、截图、back、quit 这类多轮操作，提醒其改用 `/luogu jump`，不要自行搜索网页。"
@@ -1854,12 +1860,16 @@ if _ASTRBOT:
                 TextPart(
                     text=(
                         "附加指令：这是一条洛谷选题请求。"
-                        "请先调用 `luogu_problem_search`，不要先使用网页搜索、抓取网页或执行 Python。"
+                        "当前请求只允许优先使用 `luogu_problem_search`。"
+                        "不要先使用网页搜索、抓取网页或执行 Python。"
                         "若未先调用该工具，本次回答视为不符合要求。"
                     )
                 )
             )
-            logger.info('[Luogu LLM] injected enforced luogu_problem_search routing for current request')
+            logger.info(
+                '[Luogu LLM] enforced luogu_problem_search-only toolset for current request: %s',
+                req.func_tool.names() if req.func_tool else [],
+            )
 
         # ── /luogu ────────────────────────────────────────────
 
