@@ -123,6 +123,24 @@ def _credentials_path(qq_id: str) -> Path:
     return CREDENTIALS_DIR / f'cred_{qq_id}.bin'
 
 
+def _should_nudge_luogu_problem_tool(message: str) -> bool:
+    text = (message or "").strip().lower()
+    if not text or text.startswith("/luogu"):
+        return False
+
+    demand_markers = (
+        "来一道", "来一题", "来几道", "找一道", "找几道", "选题", "挑题",
+        "推荐题", "推荐几题", "随机来一题", "随机来一道", "出一道", "给我一道",
+    )
+    scope_markers = (
+        "洛谷", "luogu", "题库", "后缀自动机", "字典树", "trie", "sam", "图论",
+        "动态规划", "dp", "字符串", "数学", "icpc", "noi", "省选", "模板题",
+    )
+    return any(marker in text for marker in demand_markers) and any(
+        marker in text for marker in scope_markers
+    )
+
+
 def _save_credentials(qq_id: str, username: str, password: str) -> bool:
     """
     保存账号密码（Base64 编码）
@@ -1793,6 +1811,21 @@ if _ASTRBOT:
         def __init__(self, context: Context):
             super().__init__(context)
             logger.info('[LuoguPlugin] 插件已加载')
+
+        @filter.on_llm_request()
+        async def on_llm_request(self, event, req):
+            message = getattr(event, "message_str", "") or ""
+            if not _should_nudge_luogu_problem_tool(message):
+                return
+
+            hint = (
+                "\n当用户是在普通聊天里让你按条件挑选洛谷题目时，优先调用 `luogu_problem_search`。"
+                "\n不要先用 `web_search`、`fetch_url` 或执行 Python 去外部搜索洛谷题目。"
+                "\n只有当用户明确进入 `/luogu jump` 多轮流程时，才把看图、截图、back 这类操作留给 `/luogu jump`。"
+            )
+            current_prompt = getattr(req, "system_prompt", "") or ""
+            if "luogu_problem_search" not in current_prompt:
+                req.system_prompt = current_prompt + hint
 
         # ── /luogu ────────────────────────────────────────────
 

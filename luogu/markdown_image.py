@@ -18,10 +18,16 @@ _FONT_CACHE: Dict[Tuple[str, int], ImageFont.FreeTypeFont | ImageFont.ImageFont]
 _MATH_CACHE: Dict[Tuple[str, int, str], Image.Image] = {}
 _FONT_GROUPS = {
     "sc": [
+        _WINDOWS_FONT_DIR / "FandolSong-Regular.otf",
+        Path(r"C:/texlive/2024/texmf-dist/fonts/opentype/public/fandol/FandolSong-Regular.otf"),
+        Path(r"C:/texlive/2023/texmf-dist/fonts/opentype/public/fandol/FandolSong-Regular.otf"),
+        Path(r"C:/Program Files/MiKTeX/fonts/opentype/public/fandol/FandolSong-Regular.otf"),
+        Path(r"C:/Users/Laptop/AppData/Local/Programs/MiKTeX/fonts/opentype/public/fandol/FandolSong-Regular.otf"),
         _WINDOWS_FONT_DIR / "NotoSansSC-VF.ttf",
         _WINDOWS_FONT_DIR / "Noto Sans SC (TrueType).otf",
         _WINDOWS_FONT_DIR / "Noto Sans SC Medium (TrueType).otf",
         _WINDOWS_FONT_DIR / "msyh.ttc",
+        _WINDOWS_FONT_DIR / "simsun.ttc",
         _WINDOWS_FONT_DIR / "simsun.ttc",
         _WINDOWS_FONT_DIR / "SimsunExtG.ttf",
     ],
@@ -60,6 +66,24 @@ _SAMPLE_HEADING_RE = re.compile(r"^(输入|输出)\s*#\d+$")
 _INLINE_MATH_RE = re.compile(
     r"(?P<block>\$\$(.+?)\$\$)|(?P<inline>\$(.+?)\$)|(?P<bracket>\\\[(.+?)\\\])|(?P<paren>\\\((.+?)\\\))"
 )
+_TABLE_SEPARATOR_RE = re.compile(r"^:?-{3,}:?$")
+
+_TITLE_TEXT_SIZE = 34
+_HEADING_TEXT_SIZE = 29
+_BODY_TEXT_SIZE = 24
+_CODE_TEXT_SIZE = 22
+_TABLE_TEXT_SIZE = 22
+
+_PAGE_BG = "#f7f1e6"
+_TEXT_COLOR = "#2a241d"
+_TITLE_COLOR = "#241d16"
+_HEADING_COLOR = "#8c3d21"
+_RULE_COLOR = "#d6c3a5"
+_CODE_BG = "#2d2924"
+_TABLE_BORDER = "#cdb99a"
+_TABLE_HEADER_BG = "#ead8b9"
+_TABLE_CELL_BG = "#fbf7ef"
+_TABLE_ALT_BG = "#f4ebdc"
 
 
 @dataclass
@@ -130,47 +154,87 @@ def _measure_text(
 
 def _tokenize_markdown(md_content: str) -> List[Tuple[str, str]]:
     tokens: List[Tuple[str, str]] = []
-    in_code = False
-    code_lines: List[str] = []
+    lines = md_content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    index = 0
 
-    for raw_line in md_content.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        line = raw_line.rstrip("\n")
+    while index < len(lines):
+        line = lines[index].rstrip("\n")
         stripped = line.strip()
 
         if stripped.startswith("```"):
-            if in_code:
-                tokens.append(("code", "\n".join(code_lines).rstrip("\n")))
-                code_lines = []
-                in_code = False
-            else:
-                in_code = True
+            code_lines: List[str] = []
+            index += 1
+            while index < len(lines):
+                candidate = lines[index].rstrip("\n")
+                if candidate.strip().startswith("```"):
+                    break
+                code_lines.append(candidate)
+                index += 1
+            tokens.append(("code", "\n".join(code_lines).rstrip("\n")))
+            index += 1
             continue
 
-        if in_code:
-            code_lines.append(line)
+        if (
+            index + 1 < len(lines)
+            and _is_table_row(stripped)
+            and _is_table_separator(lines[index + 1].strip())
+        ):
+            table_lines = [line, lines[index + 1].rstrip("\n")]
+            index += 2
+            while index < len(lines):
+                candidate = lines[index].rstrip("\n")
+                if not _is_table_row(candidate.strip()):
+                    break
+                table_lines.append(candidate)
+                index += 1
+            tokens.append(("table", "\n".join(table_lines)))
             continue
 
         if not stripped:
             tokens.append(("blank", ""))
+            index += 1
             continue
 
         if stripped.startswith("#"):
             tokens.append(("heading", stripped.lstrip("#").strip()))
+            index += 1
             continue
 
         if stripped in _KNOWN_HEADINGS or _SAMPLE_HEADING_RE.match(stripped):
             tokens.append(("heading", stripped))
+            index += 1
             continue
 
         if stripped.startswith(("- ", "* ")):
             tokens.append(("bullet", stripped[2:].strip()))
+            index += 1
             continue
 
         tokens.append(("paragraph", line))
-
-    if code_lines:
-        tokens.append(("code", "\n".join(code_lines).rstrip("\n")))
+        index += 1
     return tokens
+
+
+def _is_table_row(stripped: str) -> bool:
+    if not stripped or stripped.startswith("```"):
+        return False
+    return "|" in stripped and stripped.count("|") >= 2
+
+
+def _is_table_separator(stripped: str) -> bool:
+    if not stripped:
+        return False
+    parts = [part.strip() for part in stripped.strip("|").split("|")]
+    return bool(parts) and all(_TABLE_SEPARATOR_RE.fullmatch(part or "") for part in parts)
+
+
+def _split_table_row(row: str) -> List[str]:
+    stripped = row.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
 
 
 def _normalize_math_expression(raw: str) -> str:
@@ -209,6 +273,12 @@ def _render_math_fragment(expr: str, size: int, color: str) -> Image.Image | Non
         )
         buffer.seek(0)
         image = Image.open(buffer).convert("RGBA")
+        pixels = image.load()
+        for y in range(image.height):
+            for x in range(image.width):
+                r, g, b, a = pixels[x, y]
+                if r >= 248 and g >= 248 and b >= 248:
+                    pixels[x, y] = (255, 255, 255, 0)
         alpha_box = image.getbbox()
         if alpha_box:
             image = image.crop(alpha_box)
@@ -372,6 +442,116 @@ def _draw_lines(
     return y
 
 
+def _build_table_layout(
+    draw: ImageDraw.ImageDraw,
+    table_text: str,
+    max_width: int,
+) -> Dict[str, object]:
+    raw_lines = [line for line in table_text.splitlines() if line.strip()]
+    if len(raw_lines) < 2:
+        raise ValueError("table block is incomplete")
+
+    rows = [_split_table_row(raw_lines[0])]
+    rows.extend(_split_table_row(line) for line in raw_lines[2:])
+    col_count = max(len(row) for row in rows) if rows else 1
+
+    border_width = 2
+    cell_padding_x = 14
+    cell_padding_y = 10
+    usable_width = max_width - border_width * (col_count + 1)
+    col_width = max(140, usable_width // max(1, col_count))
+    table_width = border_width + col_count * (col_width + border_width)
+
+    table_rows: List[Dict[str, object]] = []
+    total_height = border_width
+
+    for row_index, row in enumerate(rows):
+        cell_lines: List[Sequence[Sequence[Fragment]]] = []
+        row_height = 0
+        for col_index in range(col_count):
+            cell_text = row[col_index] if col_index < len(row) else ""
+            wrapped = _wrap_fragments(
+                draw,
+                cell_text,
+                col_width - cell_padding_x * 2,
+                size=_TABLE_TEXT_SIZE,
+                fill=_TEXT_COLOR,
+            )
+            block_height = sum(_line_height(line, _TABLE_TEXT_SIZE + 4) for line in wrapped)
+            cell_lines.append(wrapped)
+            row_height = max(row_height, block_height)
+        row_height += cell_padding_y * 2
+        table_rows.append(
+            {
+                "cells": cell_lines,
+                "height": row_height,
+                "header": row_index == 0,
+            }
+        )
+        total_height += row_height + border_width
+
+    return {
+        "rows": table_rows,
+        "col_width": col_width,
+        "col_count": col_count,
+        "width": table_width,
+        "height": total_height,
+        "border_width": border_width,
+        "cell_padding_x": cell_padding_x,
+        "cell_padding_y": cell_padding_y,
+    }
+
+
+def _draw_table(
+    image: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    table_layout: Dict[str, object],
+    *,
+    x: int,
+    y: int,
+) -> int:
+    rows = table_layout["rows"]
+    col_width = int(table_layout["col_width"])
+    col_count = int(table_layout["col_count"])
+    border_width = int(table_layout["border_width"])
+    cell_padding_x = int(table_layout["cell_padding_x"])
+    cell_padding_y = int(table_layout["cell_padding_y"])
+    table_width = int(table_layout["width"])
+    table_height = int(table_layout["height"])
+
+    draw.rounded_rectangle(
+        (x, y, x + table_width, y + table_height),
+        radius=14,
+        outline=_TABLE_BORDER,
+        width=border_width,
+        fill=_TABLE_BORDER,
+    )
+
+    cursor_y = y + border_width
+    for row_index, row in enumerate(rows):
+        row_height = int(row["height"])
+        fill = _TABLE_HEADER_BG if row["header"] else (_TABLE_CELL_BG if row_index % 2 else _TABLE_ALT_BG)
+        cursor_x = x + border_width
+        for cell_lines in row["cells"]:
+            draw.rectangle(
+                (cursor_x, cursor_y, cursor_x + col_width, cursor_y + row_height),
+                fill=fill,
+            )
+            text_y = cursor_y + cell_padding_y
+            text_y = _draw_lines(
+                image,
+                draw,
+                cell_lines,
+                x=cursor_x + cell_padding_x,
+                y=text_y,
+                minimum_height=_TABLE_TEXT_SIZE + 4,
+            )
+            cursor_x += col_width + border_width
+        cursor_y += row_height + border_width
+
+    return y + table_height
+
+
 def render_markdown_to_image(md_content: str, title: str | None = None) -> bytes:
     if not md_content or not md_content.strip():
         raise ValueError("markdown content is empty")
@@ -380,7 +560,7 @@ def render_markdown_to_image(md_content: str, title: str | None = None) -> bytes
     outer_padding = 42
     inner_width = canvas_width - outer_padding * 2
 
-    probe = Image.new("RGB", (canvas_width, 200), "#f4f1ea")
+    probe = Image.new("RGB", (canvas_width, 200), _PAGE_BG)
     probe_draw = ImageDraw.Draw(probe)
 
     layout: List[Tuple[str, Sequence[Sequence[Fragment]]]] = []
@@ -391,8 +571,8 @@ def render_markdown_to_image(md_content: str, title: str | None = None) -> bytes
             probe_draw,
             title.strip(),
             inner_width,
-            size=36,
-            fill="#1f2937",
+            size=_TITLE_TEXT_SIZE,
+            fill=_TITLE_COLOR,
         )
         layout.append(("title", title_lines))
         total_height += sum(_line_height(line, 40) for line in title_lines) + 18
@@ -410,8 +590,8 @@ def render_markdown_to_image(md_content: str, title: str | None = None) -> bytes
                 probe_draw,
                 text,
                 inner_width,
-                size=29,
-                fill="#8f2d1f",
+                size=_HEADING_TEXT_SIZE,
+                fill=_HEADING_COLOR,
             )
             layout.append((kind, lines))
             total_height += sum(_line_height(line, 32) for line in lines) + 14
@@ -424,7 +604,7 @@ def render_markdown_to_image(md_content: str, title: str | None = None) -> bytes
                         probe_draw,
                         line or " ",
                         inner_width - 36,
-                        size=22,
+                        size=_CODE_TEXT_SIZE,
                         fill="#f9fafb",
                         mono=True,
                         allow_math=False,
@@ -437,25 +617,29 @@ def render_markdown_to_image(md_content: str, title: str | None = None) -> bytes
                 probe_draw,
                 f"- {text}",
                 inner_width,
-                size=24,
-                fill="#27303f",
+                size=_BODY_TEXT_SIZE,
+                fill=_TEXT_COLOR,
             )
             layout.append((kind, lines))
             total_height += sum(_line_height(line, 28) for line in lines) + 10
+        elif kind == "table":
+            table_layout = _build_table_layout(probe_draw, text, inner_width)
+            layout.append((kind, table_layout))
+            total_height += int(table_layout["height"]) + 16
         else:
             lines = _wrap_fragments(
                 probe_draw,
                 text,
                 inner_width,
-                size=24,
-                fill="#27303f",
+                size=_BODY_TEXT_SIZE,
+                fill=_TEXT_COLOR,
             )
             layout.append((kind, lines))
             total_height += sum(_line_height(line, 28) for line in lines) + 10
         last_kind = kind
 
     total_height += outer_padding
-    image = Image.new("RGB", (canvas_width, max(total_height, 400)), "#f4f1ea")
+    image = Image.new("RGB", (canvas_width, max(total_height, 400)), _PAGE_BG)
     draw = ImageDraw.Draw(image)
 
     y = outer_padding
@@ -464,7 +648,7 @@ def render_markdown_to_image(md_content: str, title: str | None = None) -> bytes
         y = _draw_lines(image, draw, title_lines, x=outer_padding, y=y, minimum_height=40)
         draw.line(
             (outer_padding, y - 6, canvas_width - outer_padding, y - 6),
-            fill="#d4c7ad",
+            fill=_RULE_COLOR,
             width=2,
         )
         y += 12
@@ -480,7 +664,7 @@ def render_markdown_to_image(md_content: str, title: str | None = None) -> bytes
             draw.rounded_rectangle(
                 (outer_padding, y, canvas_width - outer_padding, y + box_height),
                 radius=14,
-                fill="#1f2937",
+                fill=_CODE_BG,
             )
             y = _draw_lines(
                 image,
@@ -491,6 +675,17 @@ def render_markdown_to_image(md_content: str, title: str | None = None) -> bytes
                 minimum_height=26,
             )
             y += 12
+            continue
+
+        if kind == "table":
+            y = _draw_table(
+                image,
+                draw,
+                lines,
+                x=outer_padding,
+                y=y,
+            )
+            y += 16
             continue
 
         y = _draw_lines(image, draw, lines, x=outer_padding, y=y, minimum_height=28)
