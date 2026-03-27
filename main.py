@@ -63,7 +63,8 @@ from luogu.problem_lookup import (
     run_problem_async,
     should_merge_luogu_lookup_context,
 )
-from luogu.tags import DIFFICULTY_NAMES, HOT_TAGS, fuzzy_match_tag, DIFFICULTY_COLORS
+from luogu.intent_classifier import classify_luogu_routing_intent
+from luogu.tags import ALL_TAGS, DIFFICULTY_NAMES, HOT_TAGS, fuzzy_match_tag, DIFFICULTY_COLORS
 from luogu.chart_generator import (
     generate_summary_card,
     generate_heatmap,
@@ -128,24 +129,81 @@ def _credentials_path(qq_id: str) -> Path:
     return CREDENTIALS_DIR / f'cred_{qq_id}.bin'
 
 
+def _compact_lookup_text(text: str) -> str:
+    return "".join(ch.lower() for ch in str(text or "") if ch.isalnum())
+
+
+LUOGU_PROBLEM_DEMAND_MARKERS = (
+    "来一道", "来一题", "来几道", "找一道", "找几道", "选题", "挑题",
+    "推荐题", "推荐几题", "随机来一题", "随机来一道", "出一道", "给我一道",
+    "搜题", "搜一下", "查题", "题目", "跳一道", "跳一题", "跳题",
+    "整一道", "整一题", "做一道", "做一题",
+)
+
+LUOGU_SCOPE_MARKERS = (
+    "洛谷", "luogu", "题库", "后缀自动机", "字典树", "trie", "sam", "图论",
+    "动态规划", "dp", "字符串", "数学", "icpc", "noi", "省选", "模板题",
+    "线段树", "树状数组", "并查集", "最短路", "二分", "生成树", "最小生成树",
+    "次小生成树", "网络流", "蓝题", "紫题", "绿题", "黄题", "橙题", "红题", "黑题",
+)
+
+LUOGU_CLASSIFIER_HINT_MARKERS = (
+    "题", "算法", "数据结构", "竞赛", "oi", "省选", "noi", "ioi", "csp", "icpc",
+    "难度", "标签", "来源", "年份", "地区", "颜色", "蓝题", "紫题", "绿题",
+    "黄题", "橙题", "红题", "黑题",
+)
+
+
+def _has_luogu_problem_demand(text: str) -> bool:
+    return any(marker in text for marker in LUOGU_PROBLEM_DEMAND_MARKERS)
+
+
+def _collect_luogu_scope_hits(text: str) -> list[str]:
+    lowered = str(text or "").strip().lower()
+    compact = _compact_lookup_text(lowered)
+    hits: list[str] = []
+    seen = set()
+
+    def remember(raw: str) -> None:
+        item = str(raw).strip()
+        if not item or item in seen:
+            return
+        seen.add(item)
+        hits.append(item)
+
+    for marker in LUOGU_SCOPE_MARKERS:
+        if marker in lowered:
+            remember(marker)
+
+    for tag in ALL_TAGS:
+        tag_text = str(tag).strip().lower()
+        if len(tag_text) < 2:
+            continue
+        tag_compact = _compact_lookup_text(tag_text)
+        if tag_text in lowered or (tag_compact and tag_compact in compact):
+            remember(tag)
+            if len(hits) >= 24:
+                break
+
+    return hits
+
+
+def _should_consult_luogu_intent_classifier(message: str, scope_hits: list[str]) -> bool:
+    text = (message or "").strip().lower()
+    if not text or text.startswith("/luogu"):
+        return False
+    has_demand = _has_luogu_problem_demand(text)
+    has_problemish_hint = any(marker in text for marker in LUOGU_CLASSIFIER_HINT_MARKERS)
+    return has_demand and (bool(scope_hits) or has_problemish_hint)
+
+
 def _should_nudge_luogu_problem_tool(message: str) -> bool:
     text = (message or "").strip().lower()
     if not text or text.startswith("/luogu"):
         return False
 
-    demand_markers = (
-        "来一道", "来一题", "来几道", "找一道", "找几道", "选题", "挑题",
-        "推荐题", "推荐几题", "随机来一题", "随机来一道", "出一道", "给我一道",
-        "搜题", "搜一下", "查题", "题目", "跳一道", "跳一题", "跳题",
-        "整一道", "整一题", "做一道", "做一题",
-    )
-    scope_markers = (
-        "洛谷", "luogu", "题库", "后缀自动机", "字典树", "trie", "sam", "图论",
-        "动态规划", "dp", "字符串", "数学", "icpc", "noi", "省选", "模板题",
-        "线段树", "树状数组", "并查集", "最短路", "二分", "蓝题", "紫题", "绿题",
-    )
-    has_scope = any(marker in text for marker in scope_markers)
-    has_demand = any(marker in text for marker in demand_markers)
+    has_scope = bool(_collect_luogu_scope_hits(text))
+    has_demand = _has_luogu_problem_demand(text)
     has_problem_id = bool(extract_problem_id(text))
     if has_problem_id:
         return True
@@ -2036,7 +2094,25 @@ if _ASTRBOT:
         async def on_llm_request(self, event, req):
             message = getattr(event, "message_str", "") or ""
             luogu_session = self._get_luogu_llm_session(event)
-            if not (_should_nudge_luogu_problem_tool(message) or self._looks_like_luogu_follow_up(message, luogu_session)):
+            should_force_luogu = _should_nudge_luogu_problem_tool(message) or self._looks_like_luogu_follow_up(message, luogu_session)
+            scope_hits = _collect_luogu_scope_hits(message)
+            classifier_decision = None
+            if not should_force_luogu and _should_consult_luogu_intent_classifier(message, scope_hits):
+                classifier_decision = await classify_luogu_routing_intent(
+                    self.context,
+                    event,
+                    message,
+                    scope_hits,
+                )
+                if classifier_decision and classifier_decision.get("route_to_luogu"):
+                    should_force_luogu = True
+                    logger.info(
+                        "[Luogu LLM] classifier routed request to luogu_problem_search: confidence=%s reason=%s matched=%s",
+                        classifier_decision.get("confidence"),
+                        classifier_decision.get("reason"),
+                        scope_hits,
+                    )
+            if not should_force_luogu:
                 return
 
             tool_mgr = self.context.get_llm_tool_manager()
