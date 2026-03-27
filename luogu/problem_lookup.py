@@ -47,6 +47,46 @@ _FOLLOW_UP_REPLACE_MARKERS = tuple(
         "变成",
     )
 )
+_FOLLOW_UP_CORRECTION_MARKERS = tuple(
+    "".join(ch for ch in marker.lower() if ch.isalnum())
+    for marker in (
+        "不是说了",
+        "我说的是",
+        "要的是",
+        "怎么又把",
+        "怎么把",
+        "别把",
+        "别再把",
+        "还是要",
+        "仍然要",
+        "对应",
+    )
+)
+_DIFFICULTY_ALIAS_MARKERS = tuple(
+    "".join(ch for ch in marker.lower() if ch.isalnum())
+    for marker in (
+        "紫题",
+        "蓝题",
+        "绿题",
+        "黄题",
+        "橙题",
+        "红题",
+        "黑题",
+        "紫色",
+        "蓝色",
+        "绿色",
+        "黄色",
+        "橙色",
+        "红色",
+        "黑色",
+        "入门",
+        "普及",
+        "提高",
+        "省选",
+        "noi",
+        "ctsc",
+    )
+)
 
 
 def _run_problem_sync(cookies_file: str, task_fn, **kwargs) -> Any:
@@ -129,6 +169,8 @@ def should_merge_luogu_lookup_context(query: str) -> bool:
         return True
     compact = _compact_text(raw)
     if any(marker in compact for marker in _FOLLOW_UP_ADD_MARKERS + _FOLLOW_UP_REMOVE_MARKERS + _FOLLOW_UP_REPLACE_MARKERS):
+        return True
+    if any(marker in compact for marker in _FOLLOW_UP_CORRECTION_MARKERS + _DIFFICULTY_ALIAS_MARKERS):
         return True
     merge_markers = (
         "标签",

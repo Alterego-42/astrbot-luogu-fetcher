@@ -1856,6 +1856,7 @@ if _ASTRBOT:
                 "多少道", "总共有", "一共有", "总数", "随机", "random", "随便来一道", "随便来一题",
                 "再来一道", "再来一题", "第", "这道题", "题面", "转发", "合并消息",
                 "完整题面", "看图", "截图", "关键词", "标签", "来源", "难度",
+                "候选", "列表", "重发", "再发", "没看到", "不是说了", "怎么又把",
             )
             return any(marker in text for marker in follow_markers)
 
@@ -1884,6 +1885,9 @@ if _ASTRBOT:
 
             if any(marker in text for marker in ("题面", "转发", "合并消息", "完整题面", "markdown")):
                 return {"kind": "forward"}
+
+            if any(marker in text for marker in ("候选", "列表", "重发", "再发", "没看到", "再给我看")):
+                return {"kind": "repeat_candidates"}
 
             return None
 
@@ -1919,6 +1923,23 @@ if _ASTRBOT:
                 session["current_pid"] = chosen.get("pid")
                 session["current_title"] = chosen.get("title")
             self._set_luogu_llm_session(event, session)
+
+        def _render_luogu_lookup_candidate_list(self, session_data: Dict[str, Any]) -> str:
+            payload = {
+                "success": True,
+                "total": int(session_data.get("total") or 0),
+                "list_url": session_data.get("list_url"),
+                "summaries": list(session_data.get("summaries") or []),
+            }
+            return format_luogu_problem_tool_result(
+                query=str(session_data.get("query") or "当前洛谷筛选条件"),
+                action="search",
+                difficulty=session_data.get("difficulty"),
+                tags=list(session_data.get("tags") or []),
+                keyword=session_data.get("keyword"),
+                unresolved_tags=list(session_data.get("unresolved_tags") or []),
+                payload=payload,
+            )
 
         async def _send_luogu_problem_forward(
             self,
@@ -2144,6 +2165,9 @@ if _ASTRBOT:
                         unresolved_tags=session.get("unresolved_tags") or [],
                         payload=payload,
                     )
+
+                if kind == "repeat_candidates":
+                    return self._render_luogu_lookup_candidate_list(session)
 
                 current_pid = session.get("current_pid")
                 if not current_pid:
