@@ -57,6 +57,7 @@ from luogu.problem_lookup import (
     format_luogu_problem_tool_result,
     lookup_luogu_problem_by_pid,
     lookup_luogu_problems,
+    lookup_luogu_problems_from_list_url,
     merge_luogu_lookup_context,
     normalize_problem_lookup_tags,
     preflight_luogu_problem_tool_action,
@@ -2213,16 +2214,28 @@ if _ASTRBOT:
                     return f"上一轮洛谷筛选条件共找到 {total} 道题。上次只展示了前 {shown} 道候选，不是总数。"
 
                 if kind in ("random", "select"):
-                    payload = await run_problem_async(
-                        cfile,
-                        lookup_luogu_problems,
-                        difficulty=session.get("difficulty"),
-                        tags=session.get("tags") or [],
-                        keyword=session.get("keyword"),
-                        limit=session.get("limit") or limit,
-                        action="random" if kind == "random" else "select",
-                        index=follow_up.get("index"),
-                    )
+                    session_list_url = session.get("list_url")
+                    if session_list_url:
+                        payload = await run_problem_async(
+                            cfile,
+                            lookup_luogu_problems_from_list_url,
+                            list_url=session_list_url,
+                            total=session.get("total"),
+                            limit=session.get("limit") or limit,
+                            action="random" if kind == "random" else "select",
+                            index=follow_up.get("index"),
+                        )
+                    else:
+                        payload = await run_problem_async(
+                            cfile,
+                            lookup_luogu_problems,
+                            difficulty=session.get("difficulty"),
+                            tags=session.get("tags") or [],
+                            keyword=session.get("keyword"),
+                            limit=session.get("limit") or limit,
+                            action="random" if kind == "random" else "select",
+                            index=follow_up.get("index"),
+                        )
                     self._remember_luogu_lookup(
                         event,
                         query=query,
@@ -2351,8 +2364,9 @@ if _ASTRBOT:
                 payload=payload,
             )
 
-        @filter.command("luogu")
+        @filter.command("luogu", priority=999)
         async def cmd_luogu(self, event: AstrMessageEvent):
+            event.stop_event()
             args = event.message_str.strip().split()
             sub = args[1].lower() if len(args) > 1 else 'help'
             qq_id = str(event.get_sender_id())

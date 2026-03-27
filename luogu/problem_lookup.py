@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random as _random
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -472,6 +473,60 @@ def lookup_luogu_problems(
                 'difficulty_name': detail.get('difficulty_name') or '',
                 'tags': detail.get('tags') or [],
                 'url': detail.get('url') or f'https://www.luogu.com.cn/problem/{pid}',
+            }
+    return payload
+
+
+def lookup_luogu_problems_from_list_url(
+    fetcher: ProblemFetcher,
+    *,
+    list_url: str,
+    total: Optional[int],
+    limit: int,
+    action: str,
+    index: Optional[int],
+) -> Dict[str, Any]:
+    if not list_url:
+        return {
+            "success": False,
+            "message": "缺少上一轮的题库列表页，无法继续沿用当前筛选条件。",
+        }
+
+    fetcher.page.goto(list_url, timeout=20000)
+    fetcher.page.wait_for_load_state("domcontentloaded", timeout=15000)
+
+    result = fetcher._get_filter_result()
+    current_total = int(result.get("total") or total or 0)
+    summaries = fetcher.extract_problem_summaries(limit=limit)
+    payload: Dict[str, Any] = {
+        "success": True,
+        "total": current_total,
+        "list_url": fetcher.page.url or list_url,
+        "applied_tags": [],
+        "missing_tags": [],
+        "summaries": summaries,
+    }
+
+    if current_total <= 0:
+        return payload
+
+    if action in ("random", "select"):
+        if action == "random":
+            chosen_index = _random.randint(1, current_total)
+        else:
+            chosen_index = index or 1
+
+        chosen_index = max(1, min(chosen_index, current_total))
+        pid = fetcher.navigate_to_problem(chosen_index, list_url=payload["list_url"])
+        if pid:
+            detail = fetcher.get_problem_detail(pid)
+            payload["chosen"] = {
+                "index": chosen_index,
+                "pid": pid,
+                "title": detail.get("title") or pid,
+                "difficulty_name": detail.get("difficulty_name") or "",
+                "tags": detail.get("tags") or [],
+                "url": detail.get("url") or f"https://www.luogu.com.cn/problem/{pid}",
             }
     return payload
 
