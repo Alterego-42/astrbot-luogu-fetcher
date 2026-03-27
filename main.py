@@ -39,6 +39,7 @@ try:
     from astrbot.api import logger
     from astrbot.api.message_components import Face, Plain, Node, Nodes, Image
     from astrbot.core.utils.session_waiter import session_waiter, SessionController
+    from astrbot.core.agent.message import TextPart
     _ASTRBOT = True
 except ImportError:
     _ASTRBOT = False
@@ -132,18 +133,23 @@ def _should_nudge_luogu_problem_tool(message: str) -> bool:
     demand_markers = (
         "来一道", "来一题", "来几道", "找一道", "找几道", "选题", "挑题",
         "推荐题", "推荐几题", "随机来一题", "随机来一道", "出一道", "给我一道",
-        "搜题", "搜一下", "查题", "题目",
+        "搜题", "搜一下", "查题", "题目", "跳一道", "跳一题", "跳题",
+        "整一道", "整一题", "做一道", "做一题",
     )
     scope_markers = (
         "洛谷", "luogu", "题库", "后缀自动机", "字典树", "trie", "sam", "图论",
         "动态规划", "dp", "字符串", "数学", "icpc", "noi", "省选", "模板题",
+        "线段树", "树状数组", "并查集", "最短路", "二分", "蓝题", "紫题", "绿题",
     )
     has_scope = any(marker in text for marker in scope_markers)
     has_demand = any(marker in text for marker in demand_markers)
     has_problem_id = bool(extract_problem_id(text))
-    if has_problem_id and ("洛谷" in message or "luogu" in text or has_demand):
+    if has_problem_id:
         return True
-    return has_scope and (has_demand or ("题" in text and any(ch in text for ch in ("来", "找", "推", "选", "查", "搜"))))
+    return has_scope and (
+        has_demand
+        or ("题" in text and any(ch in text for ch in ("来", "找", "推", "选", "查", "搜", "跳", "做", "整")))
+    )
 
 
 def _save_credentials(qq_id: str, username: str, password: str) -> bool:
@@ -1296,29 +1302,30 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
                     await _run_in_pw(_goto_list)
 
             def _do_show():
-                if pid:
-                    detail = fetcher.get_problem_detail(pid)
-                    md_content = fetcher.extract_markdown_content(pid)
-                    normalized_pid = str(detail.get('pid') or pid).strip().upper()
+                direct_pid = pid
+                if direct_pid:
+                    detail = fetcher.get_problem_detail(direct_pid)
+                    md_content = fetcher.extract_markdown_content(direct_pid)
+                    normalized_pid = str(detail.get('pid') or direct_pid).strip().upper()
                     if not normalized_pid.startswith('P'):
                         normalized_pid = f'P{normalized_pid}'
                     return normalized_pid, detail, md_content, None
 
                 if position:
                     # 传入 list_url 用于 page 失效时恢复
-                    pid = fetcher.navigate_to_problem(position, list_url=state.get('list_url'))
-                    if not pid:
+                    resolved_pid = fetcher.navigate_to_problem(position, list_url=state.get('list_url'))
+                    if not resolved_pid:
                         return None, None, None, f'❌ 跳转题目失败（page_size={state.get("page_size")}, list_url={state.get("list_url")}）'
                 import re as _re
                 url = fetcher.page.url
                 pid_m = _re.search(r'/problem/(P?\w+)', url, _re.IGNORECASE)
-                pid = pid_m.group(1) if pid_m else '???'
-                if not pid.upper().startswith('P'):
-                    pid = 'P' + pid.upper().lstrip('P')
-                detail = fetcher.get_problem_detail(pid)
+                resolved_pid = pid_m.group(1) if pid_m else '???'
+                if not resolved_pid.upper().startswith('P'):
+                    resolved_pid = 'P' + resolved_pid.upper().lstrip('P')
+                detail = fetcher.get_problem_detail(resolved_pid)
                 # 通过 API 获取原始 Markdown 内容
-                md_content = fetcher.extract_markdown_content(pid)
-                return pid, detail, md_content, None
+                md_content = fetcher.extract_markdown_content(resolved_pid)
+                return resolved_pid, detail, md_content, None
 
             result = await _run_in_pw(_do_show)
             pid = result[0]
@@ -1822,29 +1829,47 @@ if _ASTRBOT:
             super().__init__(context)
             logger.info('[LuoguPlugin] 插件已加载')
 
-        @filter.on_llm_request()
+        @filter.on_llm_request(priority=110)
         async def on_llm_request(self, event, req):
             message = getattr(event, "message_str", "") or ""
             if not _should_nudge_luogu_problem_tool(message):
                 return
 
+            self.context.activate_llm_tool("luogu_problem_search")
+
+            hint_marker = "[LUOGU_TOOL_POLICY]"
             hint = (
+                f"\n{hint_marker}"
                 "\n当前这条用户消息属于洛谷题库选题请求。"
-                f"\n请直接优先调用 `luogu_problem_search(query={message!r})`。"
-                "\n不要先用 `web_search`、`fetch_url`、`astrbot_execute_shell` 或 `astrbot_execute_python` 去外部搜索洛谷题目。"
-                "\n如果用户消息里已经给了题号（如 P7335），也优先交给 `luogu_problem_search` 处理。"
-                "\n只有当用户明确进入 `/luogu jump` 多轮流程时，才把看图、截图、back 这类操作留给 `/luogu jump`。"
+                f"\n第一步必须直接调用 `luogu_problem_search(query={message!r})`，不要跳过。"
+                "\n在本次请求里，禁止先调用 `web_search`、`fetch_url`、`astrbot_execute_shell`、`astrbot_execute_python` 这类外部搜索工具。"
+                "\n如果用户消息里已经给了题号（如 `P7335`），也必须优先交给 `luogu_problem_search` 处理。"
+                "\n只有 `luogu_problem_search` 返回结果之后，你才能基于工具结果组织回答。"
+                "\n如果用户要看图、截图、back、quit 这类多轮操作，提醒其改用 `/luogu jump`，不要自行搜索网页。"
             )
             current_prompt = getattr(req, "system_prompt", "") or ""
-            if "luogu_problem_search" not in current_prompt:
+            if hint_marker not in current_prompt:
                 req.system_prompt = current_prompt + hint
-            logger.info('[Luogu LLM] injected luogu_problem_search hint for current request')
+            req.extra_user_content_parts.append(
+                TextPart(
+                    text=(
+                        "附加指令：这是一条洛谷选题请求。"
+                        "请先调用 `luogu_problem_search`，不要先使用网页搜索、抓取网页或执行 Python。"
+                        "若未先调用该工具，本次回答视为不符合要求。"
+                    )
+                )
+            )
+            logger.info('[Luogu LLM] injected enforced luogu_problem_search routing for current request')
 
         # ── /luogu ────────────────────────────────────────────
 
         @filter.llm_tool(name="luogu_problem_search")
         async def luogu_problem_search(self, event: AstrMessageEvent, query: str, limit: int = 5) -> str:
             """搜索或挑选洛谷题目，供主 LLM 在普通聊天中按需调用。
+
+            这是普通聊天里处理洛谷选题请求的首选工具。
+            当用户说“来一道洛谷线段树紫题”“跳一道省选题”“直接找 P7335”时，
+            应先调用本工具，而不是先去做网页搜索或执行 Python。
 
             Args:
                 query(string): 用户关于选题需求的自然语言描述，例如“来一道 ICPC 图论题”或“找几道 O2 优化题”
