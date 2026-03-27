@@ -51,7 +51,9 @@ except ImportError:
 from luogu.data_fetcher import LuoguDataFetcher
 from luogu.problem_fetcher import ProblemFetcher
 from luogu.problem_lookup import (
+    extract_problem_id,
     format_luogu_problem_tool_result,
+    lookup_luogu_problem_by_pid,
     lookup_luogu_problems,
     normalize_problem_lookup_tags,
     preflight_luogu_problem_tool_action,
@@ -74,7 +76,6 @@ from luogu.jump_session import (
     render_problem_footer,
     split_markdown_chunks,
 )
-from luogu.markdown_image import render_markdown_to_image
 from luogu.nl_jump import parse_jump_natural_language
 
 # ── 常量 ──────────────────────────────────────────────────────
@@ -131,14 +132,18 @@ def _should_nudge_luogu_problem_tool(message: str) -> bool:
     demand_markers = (
         "来一道", "来一题", "来几道", "找一道", "找几道", "选题", "挑题",
         "推荐题", "推荐几题", "随机来一题", "随机来一道", "出一道", "给我一道",
+        "搜题", "搜一下", "查题", "题目",
     )
     scope_markers = (
         "洛谷", "luogu", "题库", "后缀自动机", "字典树", "trie", "sam", "图论",
         "动态规划", "dp", "字符串", "数学", "icpc", "noi", "省选", "模板题",
     )
-    return any(marker in text for marker in demand_markers) and any(
-        marker in text for marker in scope_markers
-    )
+    has_scope = any(marker in text for marker in scope_markers)
+    has_demand = any(marker in text for marker in demand_markers)
+    has_problem_id = bool(extract_problem_id(text))
+    if has_problem_id and ("洛谷" in message or "luogu" in text or has_demand):
+        return True
+    return has_scope and (has_demand or ("题" in text and any(ch in text for ch in ("来", "找", "推", "选", "查", "搜"))))
 
 
 def _save_credentials(qq_id: str, username: str, password: str) -> bool:
@@ -1261,7 +1266,12 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
             await _send_text(f'❌ 筛选出错：{e}')
             return False
 
-    async def _show_problem(position: int = None):
+    def _extract_direct_problem_id(text: str) -> Optional[str]:
+        if not text or text.startswith('+') or text.startswith('-'):
+            return None
+        return extract_problem_id(text)
+
+    async def _show_problem(position: int = None, pid: str = None):
         """
         展示题目：先发送 Markdown + 点击指令，用户点击后再渲染图片。
         
@@ -1286,6 +1296,14 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
                     await _run_in_pw(_goto_list)
 
             def _do_show():
+                if pid:
+                    detail = fetcher.get_problem_detail(pid)
+                    md_content = fetcher.extract_markdown_content(pid)
+                    normalized_pid = str(detail.get('pid') or pid).strip().upper()
+                    if not normalized_pid.startswith('P'):
+                        normalized_pid = f'P{normalized_pid}'
+                    return normalized_pid, detail, md_content, None
+
                 if position:
                     # 传入 list_url 用于 page 失效时恢复
                     pid = fetcher.navigate_to_problem(position, list_url=state.get('list_url'))
@@ -1385,7 +1403,7 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
 
     async def _render_and_send_problem_image(mode: str = 'rendered'):
         """
-        `看图` 优先发送 Markdown 渲染长图，`截图` 发送洛谷网页截图。
+        `看图` 与 `截图` 当前统一发送洛谷网页截图。
         """
         nonlocal fetcher
         try:
@@ -1394,32 +1412,17 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
                 await _send_text('❌ 没有可渲染的题目')
                 return
 
-            img_bytes = None
-            md_content = state.get('current_md')
-            if mode == 'rendered' and md_content:
-                try:
-                    title = pid
-                    if state.get('current_title'):
-                        title = f'{pid}  {state["current_title"]}'
-                    img_bytes = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: render_markdown_to_image(md_content, title=title),
-                    )
-                except Exception as render_err:
-                    logger.warning(f'[Luogu jump] Markdown 图片渲染失败，回退网页截图: {render_err}')
+            if mode == 'rendered':
+                await _send_text('ℹ️ 当前已临时关闭 Markdown 长图渲染，改为发送更稳定的网页截图。')
 
-            if not img_bytes:
-                if mode == 'rendered':
-                    await _send_text('⚠️ Markdown 渲染失败，改用网页截图兜底。')
+            def _do_screenshot():
+                # 重新访问题目页面并截图
+                fetcher.page.goto(f'https://www.luogu.com.cn/problem/{pid}', timeout=20000)
+                fetcher.page.wait_for_load_state('domcontentloaded', timeout=15000)
+                import time as _time; _time.sleep(1.5)
+                return fetcher.screenshot_problem(pid)
 
-                def _do_screenshot():
-                    # 重新访问题目页面并截图
-                    fetcher.page.goto(f'https://www.luogu.com.cn/problem/{pid}', timeout=20000)
-                    fetcher.page.wait_for_load_state('domcontentloaded', timeout=15000)
-                    import time as _time; _time.sleep(1.5)
-                    return fetcher.screenshot_problem(pid)
-
-                img_bytes = await _run_in_pw(_do_screenshot)
+            img_bytes = await _run_in_pw(_do_screenshot)
 
             img_path = _ensure_image_path(img_bytes) if img_bytes else None
 
@@ -1427,7 +1430,7 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
                 if mode == 'screenshot':
                     await _send_text('📸 正在发送洛谷网页截图...')
                 else:
-                    await _send_text('🖼️ 正在渲染题面图片...')
+                    await _send_text('🖼️ 正在发送洛谷题面截图...')
                 await _send_img(img_path)
             else:
                 await _send_text('❌ 截图失败')
@@ -1451,6 +1454,13 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
 
         if lower in ('help', '帮助', '?'):
             await _send_text(JUMP_HELP_TEXT)
+            controller.keep(timeout=180, reset_timeout=True)
+            return
+
+        direct_pid = _extract_direct_problem_id(text)
+        if direct_pid:
+            await _send_text(f'🔎 直接定位题号：{direct_pid}')
+            await _show_problem(pid=direct_pid)
             controller.keep(timeout=180, reset_timeout=True)
             return
 
@@ -1819,13 +1829,16 @@ if _ASTRBOT:
                 return
 
             hint = (
-                "\n当用户是在普通聊天里让你按条件挑选洛谷题目时，优先调用 `luogu_problem_search`。"
-                "\n不要先用 `web_search`、`fetch_url` 或执行 Python 去外部搜索洛谷题目。"
+                "\n当前这条用户消息属于洛谷题库选题请求。"
+                f"\n请直接优先调用 `luogu_problem_search(query={message!r})`。"
+                "\n不要先用 `web_search`、`fetch_url`、`astrbot_execute_shell` 或 `astrbot_execute_python` 去外部搜索洛谷题目。"
+                "\n如果用户消息里已经给了题号（如 P7335），也优先交给 `luogu_problem_search` 处理。"
                 "\n只有当用户明确进入 `/luogu jump` 多轮流程时，才把看图、截图、back 这类操作留给 `/luogu jump`。"
             )
             current_prompt = getattr(req, "system_prompt", "") or ""
             if "luogu_problem_search" not in current_prompt:
                 req.system_prompt = current_prompt + hint
+            logger.info('[Luogu LLM] injected luogu_problem_search hint for current request')
 
         # ── /luogu ────────────────────────────────────────────
 
@@ -1847,6 +1860,23 @@ if _ASTRBOT:
                 return "缺少选题需求，请给出自然语言描述，例如“来一道提高组图论题”。"
 
             limit = max(1, min(int(limit or 5), 5))
+            direct_pid = extract_problem_id(query)
+            if direct_pid:
+                payload = await run_problem_async(
+                    cfile,
+                    lookup_luogu_problem_by_pid,
+                    pid=direct_pid,
+                )
+                return format_luogu_problem_tool_result(
+                    query=query,
+                    action='search',
+                    difficulty=None,
+                    tags=[],
+                    keyword=None,
+                    unresolved_tags=[],
+                    payload=payload,
+                )
+
             intent = await parse_jump_natural_language(self.context, event, query, HOT_TAGS)
             if not intent:
                 intent = {

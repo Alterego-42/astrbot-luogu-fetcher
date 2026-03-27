@@ -19,7 +19,7 @@ JUMP_HELP_TEXT = """📖 题库跳转帮助
   done       确认当前标签
   skip       跳过当前步骤
   random     随机选题
-  看图       生成 Markdown 题面长图
+  看图       查看题面截图（当前与截图一致）
   截图       获取洛谷网页截图
   back       返回上一步
   back-diff  重新开始筛选
@@ -138,7 +138,7 @@ def render_problem_header(pid: str, detail: Dict) -> str:
 def render_problem_footer() -> str:
     return (
         '─────────────────────\n'
-        '💡 输入「看图」查看渲染长图，输入「截图」查看洛谷网页截图\n'
+        '💡 输入「看图」或「截图」查看洛谷题面截图\n'
         '发送 `random` 换一题，`back` 改条件，`quit` 退出'
     )
 

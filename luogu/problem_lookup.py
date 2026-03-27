@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from luogu.problem_fetcher import ProblemFetcher
 from luogu.tags import DIFFICULTY_NAMES, fuzzy_match_tag
+
+_PROBLEM_ID_PREFIX_RE = re.compile(r"\b[Pp]\s*(\d{4,})\b")
+_PROBLEM_ID_CONTEXT_RE = re.compile(
+    r"(?:题号|题目|洛谷题|洛谷题号|problem)\s*(?:是|为|[:：#])?\s*([Pp]?\d{4,})\b",
+    re.IGNORECASE,
+)
 
 
 def _run_problem_sync(cookies_file: str, task_fn, **kwargs) -> Any:
@@ -44,6 +51,21 @@ def normalize_problem_lookup_tags(tags: Any) -> Tuple[List[str], List[str]]:
     return normalized, unresolved
 
 
+def extract_problem_id(text: str) -> Optional[str]:
+    content = str(text or "").strip()
+    if not content:
+        return None
+
+    for pattern in (_PROBLEM_ID_PREFIX_RE, _PROBLEM_ID_CONTEXT_RE):
+        match = pattern.search(content)
+        if not match:
+            continue
+        raw = match.group(1).replace(" ", "").upper()
+        return raw if raw.startswith("P") else f"P{raw}"
+
+    return None
+
+
 def _format_lookup_conditions(difficulty: Optional[int], tags: List[str], keyword: Optional[str]) -> str:
     parts: List[str] = []
     if difficulty is not None:
@@ -77,6 +99,33 @@ def preflight_luogu_problem_tool_action(
     if action == 'select' and not (difficulty is not None or tags or keyword):
         return "这个工具不会记住上一轮候选列表；如果你想指定序号，请把筛选条件一起说出来，或改用 /luogu jump。"
     return None
+
+
+def lookup_luogu_problem_by_pid(
+    fetcher: ProblemFetcher,
+    *,
+    pid: str,
+) -> Dict[str, Any]:
+    detail = fetcher.get_problem_detail(pid)
+    normalized_pid = str(detail.get('pid') or pid).strip().upper()
+    if not normalized_pid.startswith('P'):
+        normalized_pid = f'P{normalized_pid}'
+    return {
+        'success': True,
+        'total': 1,
+        'chosen': {
+            'index': 1,
+            'pid': normalized_pid,
+            'title': detail.get('title') or normalized_pid,
+            'difficulty_name': detail.get('difficulty_name') or '',
+            'tags': detail.get('tags') or [],
+            'url': detail.get('url') or f'https://www.luogu.com.cn/problem/{normalized_pid}',
+        },
+        'summaries': [],
+        'list_url': f'https://www.luogu.com.cn/problem/{normalized_pid}',
+        'applied_tags': [],
+        'missing_tags': [],
+    }
 
 
 def lookup_luogu_problems(
