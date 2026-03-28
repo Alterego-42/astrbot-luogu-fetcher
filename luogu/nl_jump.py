@@ -12,6 +12,17 @@ import re
 from typing import Any, Dict, List, Optional
 
 
+_COLOR_DIFFICULTY_MARKERS = (
+    ("黑题", 8),
+    ("紫题", 7),
+    ("蓝题", 6),
+    ("绿题", 5),
+    ("黄题", 4),
+    ("橙题", 3),
+    ("红题", 2),
+)
+
+
 def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
     """从模型输出中抽取首个 JSON 对象。"""
     if not text:
@@ -33,7 +44,18 @@ def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
-def _sanitize_intent(intent: Dict[str, Any]) -> Dict[str, Any]:
+def _infer_difficulty_from_text(user_text: str) -> Optional[int]:
+    raw = str(user_text or "").strip().lower()
+    if not raw:
+        return None
+    compact = "".join(ch for ch in raw if not ch.isspace())
+    for marker, difficulty in _COLOR_DIFFICULTY_MARKERS:
+        if marker in raw or marker in compact:
+            return difficulty
+    return None
+
+
+def _sanitize_intent(intent: Dict[str, Any], user_text: str = "") -> Dict[str, Any]:
     """把模型输出收敛为受控字段。"""
     action = str(intent.get('action') or 'unknown').strip().lower()
     if action not in {
@@ -52,6 +74,9 @@ def _sanitize_intent(intent: Dict[str, Any]) -> Dict[str, Any]:
             difficulty = None
     if difficulty is not None and not (0 <= difficulty <= 8):
         difficulty = None
+    inferred_difficulty = _infer_difficulty_from_text(user_text)
+    if inferred_difficulty is not None:
+        difficulty = inferred_difficulty
 
     index = intent.get('index')
     if isinstance(index, bool):
@@ -159,4 +184,4 @@ async def parse_jump_natural_language(
     data = _extract_json_object(raw_text)
     if not data:
         return None
-    return _sanitize_intent(data)
+    return _sanitize_intent(data, user_text=user_text)

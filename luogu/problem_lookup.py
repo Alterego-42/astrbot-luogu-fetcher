@@ -231,7 +231,7 @@ def should_start_new_luogu_lookup(
     raw = str(query or "").strip()
     if not raw:
         return False
-    if action not in ("search", ""):
+    if action not in ("search", "random", "select", ""):
         return False
 
     compact = _compact_text(raw)
@@ -567,6 +567,7 @@ def format_luogu_problem_tool_result(
     if chosen:
         chosen_title = str(chosen.get('title') or '').strip()
         chosen_pid = str(chosen.get('pid') or '').strip()
+        auto_forwarded = bool(payload.get('auto_forwarded'))
         if chosen_pid and chosen_title.startswith(chosen_pid + ' '):
             chosen_title = chosen_title[len(chosen_pid) + 1:].strip()
         lines.extend([
@@ -575,8 +576,11 @@ def format_luogu_problem_tool_result(
             f'- 难度：{chosen.get("difficulty_name") or "未知"}',
             f'- 标签：{"、".join(chosen.get("tags") or []) or "无"}',
             f'- 链接：{chosen.get("url")}',
-            '如果需要继续换题、看图或截图，建议进入 /luogu jump。',
         ])
+        if auto_forwarded:
+            lines.append('题面已自动转发到当前会话。你可以继续说“再来一道”“看图”或“总共有多少道”。')
+        else:
+            lines.append('如果需要继续换题、看图或截图，建议进入 /luogu jump。')
         return '\n'.join(lines)
 
     summaries = payload.get('summaries') or []
