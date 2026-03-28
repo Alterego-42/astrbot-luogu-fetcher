@@ -2000,6 +2000,23 @@ if _ASTRBOT:
             if chosen:
                 session["current_pid"] = chosen.get("pid")
                 session["current_title"] = chosen.get("title")
+            session.pop("pending_clarification", None)
+            self._set_luogu_llm_session(event, session)
+
+        def _remember_luogu_clarification(
+            self,
+            event: AstrMessageEvent,
+            *,
+            original_query: str,
+            question: str,
+            partial_intent: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            session = self._get_luogu_llm_session(event) or {}
+            session["pending_clarification"] = {
+                "original_query": str(original_query or "").strip(),
+                "question": str(question or "").strip(),
+                "partial_intent": dict(partial_intent or {}),
+            }
             self._set_luogu_llm_session(event, session)
 
         def _render_luogu_lookup_candidate_list(self, session_data: Dict[str, Any]) -> str:
@@ -2030,6 +2047,20 @@ if _ASTRBOT:
                 or any(marker in text for marker in ("看图", "题图", "图片", "图片发出来", "题目图片", "发题图"))
             )
 
+        def _looks_like_luogu_clarification_reply(self, message: str, session_data: Optional[Dict[str, Any]]) -> bool:
+            if not session_data or not session_data.get("pending_clarification"):
+                return False
+            text = str(message or "").strip()
+            if not text or text.startswith("/luogu"):
+                return False
+            if len(text) <= 40:
+                return True
+            markers = (
+                "是的", "不是", "对", "对的", "没错", "确认", "就这个",
+                "难度", "标签", "来源", "蓝题", "紫题", "绿题", "黄题", "橙题", "红题", "黑题",
+            )
+            return any(marker in text for marker in markers)
+
         def _format_luogu_session_snapshot(self, session_data: Optional[Dict[str, Any]]) -> str:
             if not session_data:
                 return "当前没有活跃的洛谷普通聊天 session。若要开始新的选题流程，请先调用 `luogu_problem_search`。"
@@ -2057,6 +2088,9 @@ if _ASTRBOT:
                 parts.append(f'当前已选中题目：{current_pid} {current_title}'.strip())
             else:
                 parts.append("当前还没有选中题目。")
+            pending = session_data.get("pending_clarification") or {}
+            if pending.get("question"):
+                parts.append(f'当前待补充信息：{pending.get("question")}')
             return "\n".join(parts)
 
         def _resolve_luogu_target_pid(self, event: AstrMessageEvent, pid: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -2167,7 +2201,11 @@ if _ASTRBOT:
         async def on_llm_request(self, event, req):
             message = getattr(event, "message_str", "") or ""
             luogu_session = self._get_luogu_llm_session(event)
-            should_force_luogu = _should_nudge_luogu_problem_tool(message) or self._looks_like_luogu_follow_up(message, luogu_session)
+            should_force_luogu = (
+                _should_nudge_luogu_problem_tool(message)
+                or self._looks_like_luogu_follow_up(message, luogu_session)
+                or self._looks_like_luogu_clarification_reply(message, luogu_session)
+            )
             scope_hits = _collect_luogu_scope_hits(message)
             classifier_decision = None
             if not should_force_luogu and _should_consult_luogu_intent_classifier(message, scope_hits):
@@ -2244,6 +2282,7 @@ if _ASTRBOT:
                 f"{tool_usage}"
                 f"\n当前请求允许使用的工具：{', '.join(tool_names)}。"
                 "\n禁止先调用 `web_search`、`fetch_url`、`astrbot_execute_shell`、`astrbot_execute_python` 这类外部搜索工具。"
+                "\n禁止在第一次工具调用前先输出任何自然语言过渡句，例如“我来帮你找一下”“稍等我查一下”。"
                 f"\n流程要求：{sequence_hint}"
                 "\n如果当前 session 已经有 `current_pid`，就说明用户已经选中过一道题。之后的“题面/看图/截图”请求应该直接使用对应展示工具，而不是重新筛题。"
             )
@@ -2256,6 +2295,7 @@ if _ASTRBOT:
                         "附加指令：这是一条洛谷专用流程请求。"
                         f"当前允许工具只有：{', '.join(tool_names)}。"
                         "不要先使用网页搜索、抓取网页、执行 shell 或执行 Python。"
+                        "在第一次工具调用前不要先发任何自然语言说明。"
                         "如果已经选中过题，就沿用当前 Luogu session，不要丢失上下文。"
                     )
                 )
@@ -2285,6 +2325,13 @@ if _ASTRBOT:
 
             limit = max(1, min(int(limit or 10), 20))
             session = self._get_luogu_llm_session(event)
+            pending_clarification = (session or {}).get("pending_clarification") or {}
+            if pending_clarification and self._looks_like_luogu_clarification_reply(query, session):
+                original_query = str(pending_clarification.get("original_query") or "").strip()
+                if original_query and query.strip() != original_query:
+                    query = f"{original_query}\n补充说明：{query.strip()}"
+                session.pop("pending_clarification", None)
+                self._set_luogu_llm_session(event, session)
             direct_pid = extract_problem_id(query)
             if direct_pid:
                 payload = await run_problem_async(
@@ -2434,7 +2481,18 @@ if _ASTRBOT:
                     return f"当前会话已选中 {current_pid}。请改为调用 `luogu_problem_image(pid={current_pid!r}, mode={mode!r})` 发送题图。"
 
             if intent.get('need_clarification'):
-                return intent.get('clarification') or '需求还不够明确，请补充题目的难度、标签或关键词。'
+                clarification = intent.get('clarification') or '需求还不够明确，请补充题目的难度、标签或关键词。'
+                self._remember_luogu_clarification(
+                    event,
+                    original_query=query,
+                    question=clarification,
+                    partial_intent={
+                        "difficulty": intent.get("difficulty"),
+                        "tags": parsed_tags,
+                        "keyword": parsed_keyword,
+                    },
+                )
+                return clarification
 
             action = intent.get('action') or 'search'
             tags = parsed_tags

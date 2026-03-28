@@ -98,6 +98,9 @@ def _sanitize_intent(intent: Dict[str, Any], user_text: str = "") -> Dict[str, A
     clarification = str(intent.get('clarification') or '').strip() or None
     reply = str(intent.get('reply') or '').strip() or None
     need_clarification = bool(intent.get('need_clarification'))
+    if inferred_difficulty is not None and clarification and any(marker in clarification for marker in ("难度", "蓝题", "紫题", "绿题", "黄题", "橙题", "红题", "黑题")):
+        need_clarification = False
+        clarification = None
 
     return {
         'action': action,
