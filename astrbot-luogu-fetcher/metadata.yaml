@@ -1,0 +1,40 @@
+name: astrbot_plugin_luogu
+desc: 洛谷竞程平台助手插件。支持账号绑定、每日自动打卡、个人统计卡片、做题热度图、比赛等级分趋势图、练习情况按难度分布图等功能。
+version: v0.2.0
+author: YourName
+repo: https://github.com/yourname/astrbot_plugin_luogu
+
+display_name: 洛谷助手
+astrbot_version: ">=4.5.7"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+
+commands:
+  - name: luogu bind
+    desc: 绑定洛谷账号（手机号+密码），自动登录并保存 Cookie
+    usage: /luogu bind <手机号> <密码>
+
+  - name: luogu checkin
+    desc: 每日打卡（若已打卡则返回运势和连续天数）
+    usage: /luogu checkin
+
+  - name: luogu info
+    desc: 查看个人统计卡片（通过题数/提交次数/等级分/咕值/排名/评定比赛）
+    usage: /luogu info
+
+  - name: luogu heatmap
+    desc: 生成近 26 周做题热度日历图（GitHub 风格）
+    usage: /luogu heatmap
+
+  - name: luogu elo
+    desc: 生成比赛等级分趋势折线图
+    usage: /luogu elo
+
+  - name: luogu practice
+    desc: 查看练习情况（已通过/未通过题目，按难度分类柱状图）
+    usage: /luogu practice
+
+  - name: luogu help
+    desc: 显示指令帮助
+    usage: /luogu help
