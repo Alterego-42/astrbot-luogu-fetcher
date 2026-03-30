@@ -2,6 +2,9 @@
 
 一款基于 Playwright 的洛谷（Luogu） AstrBot 插件，支持账号绑定、自动打卡、数据爬取、热度图截图、题库跳转等功能。
 
+- 当前仓库：`https://github.com/Alterego-42/astrbot-luogu-fetcher`
+- 当前插件元数据版本：`v1.2.0`
+
 ## 功能特性
 
 | 指令 | 功能 |

@@ -1,8 +1,8 @@
 name: astrbot_plugin_luogu
 desc: 洛谷竞程平台助手插件。支持账号绑定、每日自动打卡、个人统计卡片、做题热度图、比赛等级分趋势图、练习情况按难度分布图等功能。
-version: v0.2.0
-author: YourName
-repo: https://github.com/yourname/astrbot_plugin_luogu
+version: v1.2.0
+author: Alterego-42
+repo: https://github.com/Alterego-42/astrbot-luogu-fetcher
 
 display_name: 洛谷助手
 astrbot_version: ">=4.5.7"
