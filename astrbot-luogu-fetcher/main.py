@@ -2052,6 +2052,87 @@ if _ASTRBOT:
                         queue.append((value, depth + 1))
             return False
 
+        def _is_quoted_image_content_part(self, part: Any) -> bool:
+            if part is None:
+                return False
+            if isinstance(part, dict):
+                part_type = str(part.get("type") or part.get("kind") or "").strip().lower()
+                if part_type in {"image", "image_url", "input_image"}:
+                    return True
+                return "image_url" in part or "image" in part
+
+            type_name = part.__class__.__name__.lower()
+            if type_name == "image" or type_name.endswith("image") or type_name.endswith("imagepart"):
+                return True
+            if hasattr(part, "image_url"):
+                return True
+            try:
+                return "image_url" in repr(part).lower()
+            except Exception:
+                return False
+
+        def _replace_request_context_content(self, context_item: Any, content: Any) -> Any:
+            if isinstance(context_item, dict):
+                updated = dict(context_item)
+                updated["content"] = content
+                return updated
+            model_copy = getattr(context_item, "model_copy", None)
+            if callable(model_copy):
+                try:
+                    return model_copy(update={"content": content})
+                except Exception:
+                    pass
+            copy_method = getattr(context_item, "copy", None)
+            if callable(copy_method):
+                try:
+                    return copy_method(update={"content": content})
+                except Exception:
+                    pass
+            try:
+                setattr(context_item, "content", content)
+            except Exception:
+                pass
+            return context_item
+
+        def _sanitize_quoted_image_request(self, req: Any) -> int:
+            removed_parts = 0
+
+            image_urls = getattr(req, "image_urls", None)
+            if isinstance(image_urls, list) and image_urls:
+                removed_parts += len(image_urls)
+                try:
+                    req.image_urls = []
+                except Exception:
+                    image_urls.clear()
+
+            contexts = getattr(req, "contexts", None)
+            if not isinstance(contexts, list):
+                return removed_parts
+
+            sanitized_contexts: list[Any] = []
+            for context_item in contexts:
+                content = context_item.get("content") if isinstance(context_item, dict) else getattr(context_item, "content", None)
+
+                if isinstance(content, list):
+                    sanitized_content = [part for part in content if not self._is_quoted_image_content_part(part)]
+                    removed_parts += len(content) - len(sanitized_content)
+                    if not sanitized_content:
+                        continue
+                    sanitized_contexts.append(self._replace_request_context_content(context_item, sanitized_content))
+                    continue
+
+                if self._is_quoted_image_content_part(content):
+                    removed_parts += 1
+                    continue
+
+                sanitized_contexts.append(context_item)
+
+            try:
+                req.contexts = sanitized_contexts
+            except Exception:
+                contexts[:] = sanitized_contexts
+            return removed_parts
+
         def _interpret_luogu_follow_up(self, query: str, session_data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
             if not session_data:
                 return None
@@ -2492,10 +2573,13 @@ if _ASTRBOT:
                 "\n如果当前 session 已经有 `current_pid`，就说明用户已经选中过一道题。之后的“题面/看图/截图”请求应该直接使用对应展示工具，而不是重新筛题。"
             )
             if quoted_image_context:
+                removed_parts = self._sanitize_quoted_image_request(req)
                 hint += (
                     "\n如果用户这次是在引用带图片的消息继续追问，请在完成必要工具调用后，用一句简短提醒补充说明："
                     "当前模型可能无法读取引用里的图片内容；如果结果不对，请去掉图片引用，直接用纯文本重发需求。"
                 )
+            if quoted_image_context:
+                logger.info('[Luogu LLM] sanitized quoted-image request parts: removed=%s', removed_parts)
             current_prompt = getattr(req, "system_prompt", "") or ""
             if hint_marker not in current_prompt:
                 req.system_prompt = current_prompt + hint

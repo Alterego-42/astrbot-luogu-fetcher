@@ -1,88 +1,68 @@
-二、last test.txt 最近测试复盘（关键）
-你在文件开头给出的结论是：
-1. 引用图片处理失败日志仍存在
-2. 整体处理偏慢，疑似存在重复步骤
-这两个结论都被日志证实。
+二、从 last test.txt 看到的真实问题（按影响度）
+1) P0：session 条件串味（你说的“session 混乱”是成立的）
+日志证据： 在“LCA紫题”后又说“状压DP蓝题”，实际请求 URL 出现：
+• tag=211（LCA）+ tag=464（状压DP）同时存在
+这说明第二轮本应“新需求替换”，却被当成“在旧条件上追加”。
+根因定位：
+• problem_lookup.py 里 should_merge_luogu_lookup_context / merge_luogu_lookup_context 对“再来一道”的语义偏向“继承旧条件”
+• 缺少“新旧标签无交集时强制重置”的规则
  
-A. 通过项（功能可用）
-从完整聊天+日志看，主要链路是通的：
-• “LCA 紫题”能正确筛出候选（50）
-• “第一题”能选中并发送题面（P1600）
-• “线段树紫题 来源IOI/ICPC”能筛出大候选（453）
-• “随便来一道”最终也能拿到题面（P1235）
-• “看图”能发送题面截图
-=> 说明：功能正确性基本可用，问题主要集中在稳定性、效率、日志噪音。
+2) P0：引用图片导致 400 错误（但流程被容错继续）
+日志证据： unknown variant 'image_url', expected 'text'（core.astr_main_agent）
+含义：
+• 请求体里出现 image_url part，但当前模型/通道只接受 text part
+• 插件现在能检测“quoted image context”，但主要是提示，没有彻底在发送前清理该图片 part
+结论：
+• 这是 Core/Provider 兼容问题 + 插件可做前置清理兜底
+• 不是“完全阻断”，但会造成报错噪音和额外耗时
  
-B. 失败/异常项（高优先级）
-1) 引用图片触发 400（重复出现）
-日志特征：
-• core.astr_main_agent:574
-• unknown variant 'image_url', expected 'text'
-判断：
-• 这是 AstrBot Core / provider 请求体格式兼容问题（text-only provider 不接受 image_url part）
-• 插件侧无法根治，但可做体验降级提示和降噪兜底
-2) 随机跳题过程中的分页检测不稳定
-日志特征：
-• 同一流程里 _detect_page_size 多次执行
-• page=5 时出现 题目链接=0，随后回退到 20/页
-• 最后仍能返回结果，但中间有警告和冗余流程
-判断：
-• 页面动态加载/反爬触发导致 DOM 抽取瞬时失败
-• 当前检测与回退策略可“保命”，但效率和确定性不足
+3) P1：速度慢（主要是网页链路开销+重复探测）
+从日志看慢点主要在：
+• 题库页加载 + DOM 稳定等待
+• _detect_page_size 重复执行
+• 深页定位（如第50题）时再次检测分页与跳页开销
+功能“能完成”，但交互体感慢。
  
-C. 性能慢的真实来源（从日志看）
-你说“太慢+重复步骤”，我认同，来源主要有三类：
-1. 重复 page size 检测
-同一请求内存在重复 _detect_page_size（至少可见两次）
-2. 工具链路冗余调用
-普通聊天 follow-up 时工具放行策略偏宽，容易产生“先搜再判再调”的额外开销
-3. 截图/网页跳转固有耗时
-Playwright流程本身就有秒级开销，需要减少无效前置步骤
+三、当前链路是否可用
+可用性结论：主功能通路是通的（能筛题、能第N题、能发题面、能看图）。
+当前主要是稳定性和交互一致性问题，不是“完全不可用”。
  
-三、问题归属：插件可修 vs Core侧问题
-Core 侧（插件无法根治）
-• 引用图片时的 image_url 反序列化失败（400）
-◦ 需 AstrBot Core 在入模前过滤/转码消息part
-插件侧（可直接优化）
-• 分页检测重复与回退逻辑鲁棒性
-• 普通聊天 tool 放行策略过宽（导致多余调用）
-• 随机/序号选题时的上下文与缓存命中策略
-• 日志里“恢复/回退”频率高（说明主链路不够稳）
- 
-四、下一步修改建议（按优先级）
-P0（必须先做）
-1. 收敛普通聊天工具放行策略，减少冗余调用
+四、下一步修改建议（完整优先级）
+P0（本轮必须做）
+1. 修复“新需求被错误合并”
+◦ 文件：luogu/problem_lookup.py
+◦ 函数：should_start_new_luogu_lookup、should_merge_luogu_lookup_context、merge_luogu_lookup_context
+◦ 改法要点：
+■ 当用户表达“再来一道 + 新难度/新标签”时优先判定为新查询
+■ 若 old_tags ∩ new_tags == ∅，直接放弃旧 tags，不做合并
+2. 引用图片请求前清洗 image part
 ◦ 文件：main.py
-◦ 重点：on_llm_request 中 tool_names 决策
-◦ 目标：
-■ 首轮筛题：只放 luogu_problem_search
-■ 明确需要题面/已选中题目：再放 luogu_problem_statement
-■ 看图意图：放 luogu_problem_image
-◦ 收益：直接减少一轮无效tool调用和等待
-2. 给分页检测增加“请求内缓存 + 单次复用”
+◦ 位置：on_llm_request + _message_has_quoted_image_context 附近
+◦ 改法要点：
+■ 检测到引用图片后，在提交给 LLM 前移除/降级 image_url 内容
+■ 保留用户提示（“本次按文本处理”），但不要让原始 image part 进模型请求
+ 
+P1（建议紧跟）
+3. 减少分页探测重复与回退抖动
 ◦ 文件：luogu/problem_fetcher.py
-◦ 重点函数：_detect_page_size、跳题相关调用链
-◦ 目标：同一筛选条件/同一请求里不要重复探测 page size
-◦ 收益：减少重复网页解析与延迟
-3. 引用图片异常的插件侧提示兜底
+◦ 函数：_detect_page_size、navigate_to_problem
+◦ 改法要点：
+■ 同一筛选请求内复用已探测 page_size
+■ 深页跳转后二次探测失败时做轻量重试并记录明确 fallback 原因
+4. 收紧普通聊天工具放行策略
 ◦ 文件：main.py
-◦ 目标：检测到引用图片上下文时，给用户清晰提示“请不要带图片引用重发文本”
-◦ 说明：不能根治400，但可显著改善用户感知
+◦ 函数：on_llm_request
+◦ 改法要点：
+■ 首轮默认只放 luogu_problem_search
+■ 仅在已选中题且用户明确请求时放 statement/image
+■ 减少一次消息多工具并发导致的冗余路径
  
-P1（建议本轮完成）
-1. 随机选题定位鲁棒性增强
-◦ 文件：luogu/problem_fetcher.py
-◦ 目标：
-■ page=N抽取为空时，增加轻量重试和同页二次DOM稳定等待
-■ 失败后 fallback 要可追踪、可解释
-2. 统一“候选总数/展示数量”文案与会话状态
-◦ 文件：main.py + luogu/problem_lookup.py
-◦ 目标：避免“展示前10道”被误解为总数，追问时上下文更稳
-3. 关键路径打点更结构化
-◦ 文件：main.py / problem_fetcher.py
-◦ 目标：每次选题输出 intent -> strategy -> pid，方便定位慢点和错点
- 
-P2（可选优化）
-1. 对 page=5 这类深页场景做“候选列表先抽样、再精确落点”
-2. 减少 session 内大文本驻留（如 current_md）
-3. 补一组针对“随机/序号/看图追问”的自动化 smoke 测试脚本或回归清单细化
+P2（质量增强）
+5. 补关键回归测试（至少 smoke）
+◦ 重点覆盖：
+■ “LCA紫题 -> 再来状压DP蓝题”不串味
+■ 引用含图消息追问不再触发 image_url 400
+■ “第N题/随机/看图/题面”多轮切换不丢 session
+6. 增强结构化日志
+◦ 在每次选题输出：intent -> merge_or_new -> final filters -> action -> pid
+◦ 便于快速判断是解析问题、合并问题还是抓取问题
