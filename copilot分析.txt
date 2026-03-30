@@ -1,0 +1,146 @@
+一、日志问题归纳（基于 last test.txt）
+1) P0：引用图片触发 provider 400
+典型日志：
+
+core.astr_main_agent:574 处理引用图片失败
+unknown variant image_url, expected text（173/192/270 行附近重复出现）
+结论：当前聊天模型端是 text-only（或该 provider 不接受 image_url），但引用消息里包含图片组件，导致请求序列化失败。
+
+2) P0：题面“串题”（你说的“md 获取串了”）
+复现场景：
+
+先选到 P6224
+又检索“线段树紫题”得到新候选
+用户说“第一题，题面和图片都发过来”
+实际仍发送 P6224 的图/题面，且 Markdown 长度多次固定 705
+结论：新一轮检索后没有选中具体题时，旧 current_pid 没被清理，后续“题面/图片”继续命中旧题。
+
+3) P1：tool 参数被忽略
+日志有：
+
+工具 luogu_problem_search 忽略非期望参数: {'query'}
+虽然插件里有 fallback（从 event.message_str 恢复 query），但说明 tool 参数 schema/签名兼容性存在问题。
+
+二、和开发文档的对应（astrbot插件开发.md）
+文档强调：
+
+@filter.llm_tool 参数要清晰可推断（示例有明确 Args）
+消息链包含 Plain/Image/...，但应考虑 provider 能力差异
+on_llm_request 可做请求前控制
+结合现状：你的插件工具逻辑没问题，但多模态消息注入到 text-only provider这件事目前没有兜底策略。
+
+三、代码级根因定位（关键文件）
+文件：/home/runner/work/astrbot-luogu-fetcher/astrbot-luogu-fetcher/astrbot-luogu-fetcher/main.py
+
+A. 串题根因（最关键，确定性）
+_remember_luogu_lookup（约 1984+）
+仅在 chosen 存在时更新 current_pid/current_title
+未在“仅候选列表”场景清理旧 current_pid
+on_llm_request（2200+）
+对“题面和图片都发过来”这类 follow-up，会直接只放行 luogu_problem_image
+_resolve_luogu_target_pid（2096+）
+pid 缺失时直接回退 session 里的 current_pid（于是拿到旧题）
+这条链路完整解释了“线段树检索后仍拿 P6224”。
+
+B. image_url 报错根因（大概率在核心框架层）
+报错先于插件 on_llm_request 执行出现（日志时间顺序可见），说明异常发生在 core 处理引用内容阶段。
+插件可做的是降低触发概率/增加兜底，但彻底修复很可能要在 AstrBot core 做“text-only provider 下过滤图片引用”。
+
+C. query 参数忽略根因（框架/签名兼容）
+luogu_problem_search(self, event, query: Optional[str]=None, limit=10) 存在，但 runner 仍提示忽略 query。
+更稳做法是改为显式 FunctionTool 参数 schema（文档里也有该模式），避免反射推断偏差。
+
+四、完整修复建议（P0/P1/P2）
+P0（立即修）
+P0-1 修复“串题”状态污染（必须）
+现象：新检索后，题面仍指向旧题。
+根因：新检索无 chosen 时没清空 current_pid。
+改法（最小）： 在 _remember_luogu_lookup 中：
+若 chosen 存在：写入 current_pid/current_title
+若 chosen 不存在：pop("current_pid", None)、pop("current_title", None)、pop("current_md", None)
+涉及：main.py（约 1984-2004）
+风险：低；只影响会话状态正确性。
+回归点：候选列表后请求题面应提示“先选题”或先走 select/random，不再回旧题。
+P0-2 修复“第一题，题面和图片都发过来”路由策略
+现象：该句只触发图片工具，不会先 select 第1题。
+根因：on_llm_request follow-up 判断遇“图片”优先直接 luogu_problem_image。
+改法（最小）：
+当消息同时包含“第N题”+“题面/图片”时，工具顺序应为：
+luogu_problem_search（select index=N）
+luogu_problem_statement / luogu_problem_image
+涉及：main.py（2200+ 的 tool_names 分支）
+风险：中；需要注意不影响纯“看图”请求。
+回归点：第一题，题面和图片都发过来 应命中新题而非旧题。
+P0-3 引用图片 400 的兜底（插件侧可做）
+现象：引用图片导致 provider 400。
+根因：text-only provider 接收到 image_url。
+改法（插件可做）：
+在触发 luogu 工具请求时，尽量基于 event.message_str 驱动，不依赖引用链图像内容。
+增加用户提示：检测到“引用图片+text-only provider”时，引导用户重发纯文本（如“给出题面图片”）。
+更彻底（建议上游）：
+AstrBot core 在 text-only provider 下过滤/降级 image part（保留文本 alt）。
+涉及：插件 main.py +（建议）core astr_main_agent
+风险：插件侧低；core侧中。
+回归点：引用图片时不再中断对话流程。
+P1（本周修）
+P1-1 工具参数 schema 显式化（解决 query 被忽略）
+现象：query 被 runner 视为非期望参数。
+改法：
+把 luogu_problem_search/statement/image 迁移到显式 FunctionTool（pydantic parameters schema）
+或至少补齐 llm_tool docstring Args + 避免 Optional 推断歧义（兼容性较弱）
+涉及：main.py（2310+, 2558+, 2572+）
+风险：中（工具注册方式变更）
+回归点：日志不再出现“忽略非期望参数”。
+P1-2 session 增加更新时间和过期策略
+现象：长会话容易残留历史状态。
+改法：
+session 写入 updated_at
+_resolve_luogu_target_pid 检查超时（如 10~30 分钟），超时则要求重新选题
+涉及：_set/_get/_resolve相关函数
+风险：低
+回归点：超时后行为可预期，不串上下文。
+P1-3 metadata 版本门槛同步
+当前 metadata.yaml 是 astrbot_version: ">=4.5.7"，但你的日志运行在 4.20.1 生态，建议明确声明你依赖的功能最小版本（例如包含 tool-loop 参数修复后的版本）。
+风险：低；安装约束更明确。
+P2（优化）
+P2-1 current_md 缓存策略优化
+现在把 md 大文本挂在 session 内存里（session["current_md"] = md_content），可考虑：
+不缓存 md，仅缓存 pid/title
+或按 pid 做短 TTL 缓存（KV）
+降低内存占用和串题副作用。
+P2-2 观测性增强
+打更多结构化日志：
+每次工具调用前打印 resolved_pid、session 摘要
+记录“本次是否清理了 current_pid”
+方便快速定位类似问题。
+五、最小改动路径 vs 增强路径
+最小改动路径（推荐先做）
+_remember_luogu_lookup：无 chosen 时清空 current_pid/title/md
+on_llm_request：处理“第N题 + 题面/图片”先 select 再展示
+luogu_problem_statement/image：pid 为空时提示更明确（当前会话无选中题）
+增加日志（resolved_pid + source=session/explicit）
+这组改动小、见效快，能直接解决你日志里的“md串题”。
+
+可选增强路径
+改成显式 FunctionTool 参数 schema
+session TTL + LRU 清理
+向 AstrBot core 提 PR：text-only provider 自动过滤 image 引用 part
+六、可执行测试清单（按你的日志场景）
+串题复现回归
+
+来一道KD树紫题 -> 随便来一道 -> 记住题A
+再来一道线段树紫题 -> 第一题，题面和图片都发过来
+期望：发送的是线段树第1题（题B），不是题A
+仅候选后直接题面
+
+来一道线段树紫题
+立刻 还有题面md呢
+期望：提示“请先选第N题/随机”，不能回旧题
+引用图片触发
+
+引用 bot 图片消息后发“给出题面图片”
+期望：不中断；至少有降级提示，不出现致命流程失败
+query 参数校验
+
+检查日志不再出现 忽略非期望参数: {'query'}
+或确保 fallback 命中率下降（意味着参数已正常传入）

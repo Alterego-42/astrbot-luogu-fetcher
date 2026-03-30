@@ -1915,6 +1915,53 @@ if _ASTRBOT:
             for key in self._luogu_llm_session_keys(event):
                 self._luogu_llm_sessions[key] = session_data
 
+        def _parse_simple_chinese_number(self, text: str) -> Optional[int]:
+            digits = {
+                "零": 0,
+                "一": 1,
+                "二": 2,
+                "两": 2,
+                "三": 3,
+                "四": 4,
+                "五": 5,
+                "六": 6,
+                "七": 7,
+                "八": 8,
+                "九": 9,
+            }
+            units = {"十": 10, "百": 100, "千": 1000}
+            value = str(text or "").strip()
+            if not value:
+                return None
+
+            total = 0
+            current = 0
+            for ch in value:
+                if ch in digits:
+                    current = digits[ch]
+                    continue
+                unit = units.get(ch)
+                if unit is None:
+                    return None
+                if current == 0:
+                    current = 1
+                total += current * unit
+                current = 0
+            total += current
+            return total if total > 0 else None
+
+        def _parse_luogu_follow_up_index(self, query: str) -> Optional[int]:
+            text = str(query or "").strip()
+            if not text:
+                return None
+            digit_match = re.search(r"第\s*(\d+)\s*[题道个]?", text)
+            if digit_match:
+                return int(digit_match.group(1))
+            chinese_match = re.search(r"第\s*([零一二两三四五六七八九十百千]+)\s*[题道个]?", text)
+            if chinese_match:
+                return self._parse_simple_chinese_number(chinese_match.group(1))
+            return None
+
         def _looks_like_luogu_follow_up(self, message: str, session_data: Optional[Dict[str, Any]]) -> bool:
             if not session_data:
                 return False
@@ -1940,9 +1987,9 @@ if _ASTRBOT:
             if any(marker in text for marker in ("总共有多少", "一共有多少", "总数", "多少道")):
                 return {"kind": "count"}
 
-            index_match = re.search(r"第\s*(\d+)\s*[题道个]?", text)
-            if index_match:
-                return {"kind": "select", "index": int(index_match.group(1))}
+            follow_up_index = self._parse_luogu_follow_up_index(text)
+            if follow_up_index:
+                return {"kind": "select", "index": follow_up_index}
 
             random_markers = (
                 "随便来一道", "随便来一题", "随机来一道", "随机来一题",
@@ -2000,6 +2047,16 @@ if _ASTRBOT:
             if chosen:
                 session["current_pid"] = chosen.get("pid")
                 session["current_title"] = chosen.get("title")
+                logger.info(
+                    "[Luogu LLM] remembered selected problem: pid=%s title=%s",
+                    session.get("current_pid"),
+                    session.get("current_title"),
+                )
+            else:
+                session.pop("current_pid", None)
+                session.pop("current_title", None)
+                session.pop("current_md", None)
+                logger.info("[Luogu LLM] cleared stale selected problem after candidate-only lookup")
             session.pop("pending_clarification", None)
             self._set_luogu_llm_session(event, session)
 
@@ -2098,12 +2155,23 @@ if _ASTRBOT:
             if not requested_pid:
                 requested_pid = extract_problem_id(getattr(event, "message_str", "") or "")
             if requested_pid:
+                logger.info("[Luogu LLM] resolved target pid from explicit input: %s", requested_pid)
                 return requested_pid, None
 
             session = self._get_luogu_llm_session(event) or {}
             current_pid = str(session.get("current_pid") or "").strip().upper()
             if current_pid:
-                return current_pid if current_pid.startswith("P") else f'P{current_pid}', None
+                normalized_pid = current_pid if current_pid.startswith("P") else f'P{current_pid}'
+                logger.info("[Luogu LLM] resolved target pid from session current_pid: %s", normalized_pid)
+                return normalized_pid, None
+            total = int(session.get("total") or 0)
+            shown = int(session.get("shown_count") or 0)
+            if total > 0:
+                return None, (
+                    f"当前会话只有候选列表，还没有真正选中题目。"
+                    f"请先指定“第N题”或“随机来一道”完成选题。"
+                    f"这一轮候选共 {total} 道，当前展示了前 {shown} 道。"
+                )
             return None, "当前会话还没有选中的题目。请先用 `luogu_problem_search` 选出一道题，再调用题面或题图工具。"
 
         async def _send_luogu_problem_forward(
@@ -2231,21 +2299,47 @@ if _ASTRBOT:
             direct_pid = extract_problem_id(message)
             requests_image = self._message_requests_problem_image(message)
             requests_statement = self._message_requests_problem_statement(message)
+            follow_up_select = bool(follow_up and follow_up.get("kind") == "select")
+            requests_both_statement_and_image = requests_statement and requests_image
 
             tool_names: list[str]
             sequence_hint: str
-            if follow_up and follow_up.get("kind") == "image":
-                tool_names = ["luogu_problem_image"]
-                sequence_hint = "这是图片阶段，直接调用 `luogu_problem_image`。用户明确说“截图/官网截图”时传 `mode=\"screenshot\"`，否则用默认渲染图。"
-            elif follow_up and follow_up.get("kind") == "forward":
-                tool_names = ["luogu_problem_statement"]
-                sequence_hint = "这是题面阶段，直接调用 `luogu_problem_statement`。如果参数里没给 pid，就让工具读取当前 session 的 `current_pid`。"
+            if follow_up_select and requests_both_statement_and_image:
+                tool_names = ["luogu_problem_search", "luogu_problem_statement", "luogu_problem_image"]
+                sequence_hint = (
+                    "这是“先选第 N 题，再同时发题面和题图”的请求。"
+                    "先调用 `luogu_problem_search` 完成 select，"
+                    "再调用 `luogu_problem_statement` 和 `luogu_problem_image`。"
+                )
+            elif follow_up_select and requests_image:
+                tool_names = ["luogu_problem_search", "luogu_problem_image"]
+                sequence_hint = (
+                    "这是“先选第 N 题，再发题图”的请求。"
+                    "先调用 `luogu_problem_search` 完成 select，"
+                    "确认 session 已写入新的 `current_pid` 后，再调用 `luogu_problem_image`。"
+                )
+            elif follow_up_select and requests_statement:
+                tool_names = ["luogu_problem_search", "luogu_problem_statement"]
+                sequence_hint = (
+                    "这是“先选第 N 题，再发题面”的请求。"
+                    "先调用 `luogu_problem_search` 完成 select，"
+                    "确认 session 已写入新的 `current_pid` 后，再调用 `luogu_problem_statement`。"
+                )
+            elif direct_pid and requests_both_statement_and_image:
+                tool_names = ["luogu_problem_statement", "luogu_problem_image"]
+                sequence_hint = "用户已经给出题号，且同时想看题面和题图。先调用 `luogu_problem_statement`，再调用 `luogu_problem_image`。"
             elif direct_pid and requests_image:
                 tool_names = ["luogu_problem_image"]
                 sequence_hint = "用户已经给出题号且想看图，直接调用 `luogu_problem_image`。"
             elif direct_pid and (requests_statement or message.strip().upper() == direct_pid):
                 tool_names = ["luogu_problem_statement"]
                 sequence_hint = "用户已经给出题号且想看题面，直接调用 `luogu_problem_statement`。"
+            elif follow_up and follow_up.get("kind") == "image":
+                tool_names = ["luogu_problem_image"]
+                sequence_hint = "这是图片阶段，直接调用 `luogu_problem_image`。用户明确说“截图/官网截图”时传 `mode=\"screenshot\"`，否则用默认渲染图。"
+            elif follow_up and follow_up.get("kind") == "forward":
+                tool_names = ["luogu_problem_statement"]
+                sequence_hint = "这是题面阶段，直接调用 `luogu_problem_statement`。如果参数里没给 pid，就让工具读取当前 session 的 `current_pid`。"
             elif follow_up and follow_up.get("kind") in ("count", "repeat_candidates"):
                 tool_names = ["luogu_problem_search"]
                 sequence_hint = "这是筛题结果追问阶段，只调用 `luogu_problem_search` 读取当前 session。"
@@ -2301,8 +2395,10 @@ if _ASTRBOT:
                 )
             )
             logger.info(
-                '[Luogu LLM] enforced luogu toolset for current request: %s',
+                '[Luogu LLM] enforced luogu toolset for current request: tools=%s follow_up=%s direct_pid=%s',
                 req.func_tool.names() if req.func_tool else [],
+                follow_up,
+                direct_pid,
             )
 
         # ── /luogu ────────────────────────────────────────────

@@ -8,9 +8,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from luogu.problem_fetcher import ProblemFetcher
 from luogu.tags import DIFFICULTY_NAMES, fuzzy_match_tag
 
-_PROBLEM_ID_PREFIX_RE = re.compile(r"\b[Pp]\s*(\d{4,})\b")
+_PROBLEM_ID_PREFIX_RE = re.compile(r"(?<![A-Za-z0-9])[Pp]\s*(\d{4,})(?!\d)")
 _PROBLEM_ID_CONTEXT_RE = re.compile(
-    r"(?:题号|题目|洛谷题|洛谷题号|problem)\s*(?:是|为|[:：#])?\s*([Pp]?\d{4,})\b",
+    r"(?:题号|题目|洛谷题|洛谷题号|problem)\s*(?:是|为|[:：#])?\s*([Pp]?\d{4,})(?!\d)",
     re.IGNORECASE,
 )
 
