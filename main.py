@@ -1976,6 +1976,78 @@ if _ASTRBOT:
             )
             return any(marker in text for marker in follow_markers)
 
+        def _message_requests_random_problem(self, message: str) -> bool:
+            text = str(message or "").strip().lower()
+            if not text:
+                return False
+            random_markers = (
+                "随便来一道", "随便来一题", "随机来一道", "随机来一题",
+                "随机挑一道", "随机挑一题", "随便挑一道", "随便挑一题",
+            )
+            return (
+                text == "random"
+                or any(marker in text for marker in random_markers)
+                or ("随机" in text and any(marker in text for marker in ("一道", "一题", "挑", "来")))
+            )
+
+        def _message_has_quoted_image_context(self, event: AstrMessageEvent) -> bool:
+            root = getattr(event, "message_obj", None)
+            if root is None:
+                return False
+
+            queue: list[tuple[Any, int]] = [(root, 0)]
+            seen: set[int] = set()
+            found_quote = False
+            found_image = False
+            attr_names = ("message", "chain", "components", "quote", "reply", "origin", "source", "content")
+
+            while queue:
+                current, depth = queue.pop(0)
+                if current is None:
+                    continue
+                current_id = id(current)
+                if current_id in seen:
+                    continue
+                seen.add(current_id)
+
+                type_name = current.__class__.__name__.lower()
+                text = ""
+                try:
+                    text = repr(current)
+                except Exception:
+                    text = ""
+                lower = text.lower()
+                if any(marker in lower for marker in ("quote", "reply")) or "引用" in text:
+                    found_quote = True
+                if (
+                    "image_url" in lower
+                    or "图片" in text
+                    or type_name == "image"
+                    or type_name.endswith("image")
+                ):
+                    found_image = True
+                if found_quote and found_image:
+                    return True
+
+                if depth >= 2:
+                    continue
+                if isinstance(current, dict):
+                    for value in current.values():
+                        queue.append((value, depth + 1))
+                    continue
+                if isinstance(current, (list, tuple, set)):
+                    for value in current:
+                        queue.append((value, depth + 1))
+                    continue
+                for attr in attr_names:
+                    if hasattr(current, attr):
+                        try:
+                            value = getattr(current, attr)
+                        except Exception:
+                            continue
+                        queue.append((value, depth + 1))
+            return False
+
         def _interpret_luogu_follow_up(self, query: str, session_data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
             if not session_data:
                 return None
@@ -2299,8 +2371,11 @@ if _ASTRBOT:
             direct_pid = extract_problem_id(message)
             requests_image = self._message_requests_problem_image(message)
             requests_statement = self._message_requests_problem_statement(message)
+            requests_random = self._message_requests_random_problem(message)
             follow_up_select = bool(follow_up and follow_up.get("kind") == "select")
+            follow_up_random = bool(follow_up and follow_up.get("kind") == "random")
             requests_both_statement_and_image = requests_statement and requests_image
+            quoted_image_context = self._message_has_quoted_image_context(event)
 
             tool_names: list[str]
             sequence_hint: str
@@ -2325,6 +2400,32 @@ if _ASTRBOT:
                     "先调用 `luogu_problem_search` 完成 select，"
                     "确认 session 已写入新的 `current_pid` 后，再调用 `luogu_problem_statement`。"
                 )
+            elif follow_up_select:
+                tool_names = ["luogu_problem_search", "luogu_problem_statement"]
+                sequence_hint = (
+                    "这是按序号选题阶段。先调用 `luogu_problem_search` 完成 select。"
+                    "如果已经选中了具体题目，再调用 `luogu_problem_statement` 发送题面。"
+                )
+            elif follow_up_random and requests_both_statement_and_image:
+                tool_names = ["luogu_problem_search", "luogu_problem_statement", "luogu_problem_image"]
+                sequence_hint = (
+                    "这是“随机选题后，再同时发题面和题图”的请求。"
+                    "先调用 `luogu_problem_search` 完成 random，"
+                    "再调用 `luogu_problem_statement` 和 `luogu_problem_image`。"
+                )
+            elif follow_up_random and requests_image:
+                tool_names = ["luogu_problem_search", "luogu_problem_image"]
+                sequence_hint = (
+                    "这是“随机选题后，再发题图”的请求。"
+                    "先调用 `luogu_problem_search` 完成 random，"
+                    "确认 session 已写入新的 `current_pid` 后，再调用 `luogu_problem_image`。"
+                )
+            elif follow_up_random:
+                tool_names = ["luogu_problem_search", "luogu_problem_statement"]
+                sequence_hint = (
+                    "这是随机选题阶段。先调用 `luogu_problem_search` 完成 random。"
+                    "如果已经选中了具体题目，再调用 `luogu_problem_statement` 发送题面。"
+                )
             elif direct_pid and requests_both_statement_and_image:
                 tool_names = ["luogu_problem_statement", "luogu_problem_image"]
                 sequence_hint = "用户已经给出题号，且同时想看题面和题图。先调用 `luogu_problem_statement`，再调用 `luogu_problem_image`。"
@@ -2343,13 +2444,18 @@ if _ASTRBOT:
             elif follow_up and follow_up.get("kind") in ("count", "repeat_candidates"):
                 tool_names = ["luogu_problem_search"]
                 sequence_hint = "这是筛题结果追问阶段，只调用 `luogu_problem_search` 读取当前 session。"
-            else:
+            elif requests_random:
                 tool_names = ["luogu_problem_search", "luogu_problem_statement"]
                 sequence_hint = (
-                    "这是筛题/选题阶段。先调用 `luogu_problem_search`。"
-                    "如果搜索结果已经选中了具体题目（例如随机选题、指定第 N 题或按题号直达），"
-                    "则继续调用 `luogu_problem_statement` 把题面发到当前会话。"
-                    "如果结果只是候选列表、总数或条件说明，就不要调用题面工具。"
+                    "用户明确要求随机选题。先调用 `luogu_problem_search` 完成随机选择。"
+                    "只有在搜索结果已经选中了具体题目时，才继续调用 `luogu_problem_statement`。"
+                )
+            else:
+                tool_names = ["luogu_problem_search"]
+                sequence_hint = (
+                    "这是候选筛题阶段，只调用 `luogu_problem_search`。"
+                    "如果结果只是候选列表、总数或条件说明，不要提前调用题面工具。"
+                    "只有明确选中了具体题目后，后续轮次再调用 `luogu_problem_statement` 或 `luogu_problem_image`。"
                 )
 
             tools = []
@@ -2380,6 +2486,11 @@ if _ASTRBOT:
                 f"\n流程要求：{sequence_hint}"
                 "\n如果当前 session 已经有 `current_pid`，就说明用户已经选中过一道题。之后的“题面/看图/截图”请求应该直接使用对应展示工具，而不是重新筛题。"
             )
+            if quoted_image_context:
+                hint += (
+                    "\n如果用户这次是在引用带图片的消息继续追问，请在完成必要工具调用后，用一句简短提醒补充说明："
+                    "当前模型可能无法读取引用里的图片内容；如果结果不对，请去掉图片引用，直接用纯文本重发需求。"
+                )
             current_prompt = getattr(req, "system_prompt", "") or ""
             if hint_marker not in current_prompt:
                 req.system_prompt = current_prompt + hint
@@ -2391,21 +2502,32 @@ if _ASTRBOT:
                         "不要先使用网页搜索、抓取网页、执行 shell 或执行 Python。"
                         "在第一次工具调用前不要先发任何自然语言说明。"
                         "如果已经选中过题，就沿用当前 Luogu session，不要丢失上下文。"
+                        + (
+                            "若用户是在引用图片追问，请在完成工具调用后提醒：当前模型可能读不到引用图片内容，必要时请用户去掉引用后重发文本。"
+                            if quoted_image_context
+                            else ""
+                        )
                     )
                 )
             )
             logger.info(
-                '[Luogu LLM] enforced luogu toolset for current request: tools=%s follow_up=%s direct_pid=%s',
+                '[Luogu LLM] enforced luogu toolset for current request: tools=%s follow_up=%s direct_pid=%s quoted_image=%s',
                 req.func_tool.names() if req.func_tool else [],
                 follow_up,
                 direct_pid,
+                quoted_image_context,
             )
 
         # ── /luogu ────────────────────────────────────────────
 
         @filter.llm_tool(name="luogu_problem_search")
         async def luogu_problem_search(self, event: AstrMessageEvent, query: Optional[str] = None, limit: int = 10) -> str:
-            """只负责普通聊天里的洛谷筛题、续筛、总数追问和选题。"""
+            """只负责普通聊天里的洛谷筛题、续筛、总数追问和选题。
+
+            Args:
+                query: 用户的自然语言筛题/追问文本；缺失时会回退到 `event.message_str`。
+                limit: 候选列表最多返回多少道题，范围 1-20。
+            """
             qq_id = str(event.get_sender_id())
             cfile = str(_cookies_path(qq_id))
             if not Path(cfile).exists():
@@ -2653,7 +2775,11 @@ if _ASTRBOT:
 
         @filter.llm_tool(name="luogu_problem_statement")
         async def luogu_problem_statement(self, event: AstrMessageEvent, pid: Optional[str] = None) -> str:
-            """只负责根据题号或当前 session 发送题面。"""
+            """只负责根据题号或当前 session 发送题面。
+
+            Args:
+                pid: 目标题号；省略时读取当前 Luogu session 的 `current_pid`。
+            """
 
             qq_id = str(event.get_sender_id())
             cfile = str(_cookies_path(qq_id))
@@ -2672,7 +2798,12 @@ if _ASTRBOT:
             pid: Optional[str] = None,
             mode: str = "rendered",
         ) -> str:
-            """只负责根据题号或当前 session 发送题图/截图。"""
+            """只负责根据题号或当前 session 发送题图/截图。
+
+            Args:
+                pid: 目标题号；省略时读取当前 Luogu session 的 `current_pid`。
+                mode: `rendered` 发送渲染图，`screenshot` 发送网页截图。
+            """
 
             qq_id = str(event.get_sender_id())
             cfile = str(_cookies_path(qq_id))
