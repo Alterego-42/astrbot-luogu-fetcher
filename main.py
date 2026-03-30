@@ -65,6 +65,18 @@ from luogu.problem_lookup import (
     should_start_new_luogu_lookup,
     should_merge_luogu_lookup_context,
 )
+from luogu.planner import (
+    detect_selected_image_follow_up_intent,
+    plan_luogu_workflow,
+)
+from luogu.session_events import (
+    EVENT_CANDIDATES_UPDATED,
+    EVENT_IMAGE_SENT,
+    EVENT_PROBLEM_SELECTED,
+    EVENT_STATEMENT_SENT,
+    append_session_event,
+    replay_luogu_session_state,
+)
 from luogu.intent_classifier import classify_luogu_routing_intent
 from luogu.tags import ALL_TAGS, DIFFICULTY_NAMES, HOT_TAGS, fuzzy_match_tag, DIFFICULTY_COLORS
 from luogu.chart_generator import (
@@ -1919,6 +1931,13 @@ if _ASTRBOT:
             for key in self._luogu_llm_session_keys(event):
                 self._luogu_llm_sessions[key] = session_data
 
+        def _append_luogu_session_event(self, session_data: Dict[str, Any], event_type: str, **payload: Any) -> None:
+            append_session_event(session_data, event_type, **payload)
+
+        def _replay_luogu_session_state(self, session_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+            current = session_data or {}
+            return replay_luogu_session_state(current.get("events") or [], fallback=current)
+
         def _parse_simple_chinese_number(self, text: str) -> Optional[int]:
             digits = {
                 "零": 0,
@@ -2201,10 +2220,26 @@ if _ASTRBOT:
                     "shown_count": len(payload.get("summaries") or []),
                 }
             )
+            self._append_luogu_session_event(
+                session,
+                EVENT_CANDIDATES_UPDATED,
+                total=int(payload.get("total") or 0),
+                list_url=payload.get("list_url"),
+                difficulty=difficulty,
+                tags=tags,
+                keyword=keyword,
+            )
             chosen = payload.get("chosen") or {}
             if chosen:
                 session["current_pid"] = chosen.get("pid")
                 session["current_title"] = chosen.get("title")
+                self._append_luogu_session_event(
+                    session,
+                    EVENT_PROBLEM_SELECTED,
+                    pid=chosen.get("pid"),
+                    title=chosen.get("title"),
+                    list_url=payload.get("list_url"),
+                )
                 logger.info(
                     "[Luogu LLM] remembered selected problem: pid=%s title=%s",
                     session.get("current_pid"),
@@ -2415,6 +2450,13 @@ if _ASTRBOT:
             session["current_pid"] = normalized_pid
             session["current_title"] = detail.get("title") or normalized_pid
             session["current_md"] = md_content
+            self._append_luogu_session_event(
+                session,
+                EVENT_STATEMENT_SENT,
+                pid=normalized_pid,
+                title=detail.get("title") or normalized_pid,
+                markdown=md_content,
+            )
             self._set_luogu_llm_session(event, session)
             return f"已将 {normalized_pid} 的题面通过合并消息转发到当前会话。"
 
@@ -2436,6 +2478,9 @@ if _ASTRBOT:
                 return f"{pid} 的题面截图发送失败。"
             await event.send(event.plain_result("ℹ️ 当前普通聊天仍使用更稳定的网页截图路径。"))
             await event.send(event.image_result(img_path))
+            session = self._get_luogu_llm_session(event) or {}
+            self._append_luogu_session_event(session, EVENT_IMAGE_SENT, pid=pid, mode=mode)
+            self._set_luogu_llm_session(event, session)
             return f"已发送 {pid} 的题面截图。"
 
         @filter.on_llm_request(priority=110)
@@ -2477,16 +2522,32 @@ if _ASTRBOT:
             follow_up_random = bool(follow_up and follow_up.get("kind") == "random")
             requests_both_statement_and_image = requests_statement and requests_image
             quoted_image_context = self._message_has_quoted_image_context(event)
+            workflow_session = self._replay_luogu_session_state(luogu_session)
             current_pid = str((luogu_session or {}).get("current_pid") or "").strip().upper()
             short_image_follow_up = (
                 bool(current_pid)
                 and requests_image
                 and len(message.strip()) <= 12
             )
+            selected_image_intent = detect_selected_image_follow_up_intent(message, workflow_session)
+            selected_image_plan = (
+                plan_luogu_workflow(selected_image_intent, workflow_session)
+                if selected_image_intent
+                else None
+            )
 
             tool_names: list[str]
             sequence_hint: str
-            if short_image_follow_up:
+            if selected_image_plan:
+                tool_names = selected_image_plan.allowed_tools
+                sequence_hint = selected_image_plan.sequence_hint
+                logger.info(
+                    "[Luogu Workflow] planned request: intent=%s state=%s commands=%s",
+                    selected_image_plan.intent.intent.value,
+                    selected_image_plan.workflow_state.value,
+                    [command.name for command in selected_image_plan.commands],
+                )
+            elif short_image_follow_up:
                 tool_names = ["luogu_problem_image"]
                 sequence_hint = (
                     "当前 Luogu session 已经选中过具体题目，"
