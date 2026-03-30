@@ -2525,8 +2525,8 @@ if _ASTRBOT:
             """只负责普通聊天里的洛谷筛题、续筛、总数追问和选题。
 
             Args:
-                query: 用户的自然语言筛题/追问文本；缺失时会回退到 `event.message_str`。
-                limit: 候选列表最多返回多少道题，范围 1-20。
+                query (str): 用户的自然语言筛题/追问文本；缺失时会回退到 `event.message_str`。
+                limit (int): 候选列表最多返回多少道题，范围 1-20。
             """
             qq_id = str(event.get_sender_id())
             cfile = str(_cookies_path(qq_id))
@@ -2778,7 +2778,7 @@ if _ASTRBOT:
             """只负责根据题号或当前 session 发送题面。
 
             Args:
-                pid: 目标题号；省略时读取当前 Luogu session 的 `current_pid`。
+                pid (str): 目标题号；省略时读取当前 Luogu session 的 `current_pid`。
             """
 
             qq_id = str(event.get_sender_id())
@@ -2801,8 +2801,8 @@ if _ASTRBOT:
             """只负责根据题号或当前 session 发送题图/截图。
 
             Args:
-                pid: 目标题号；省略时读取当前 Luogu session 的 `current_pid`。
-                mode: `rendered` 发送渲染图，`screenshot` 发送网页截图。
+                pid (str): 目标题号；省略时读取当前 Luogu session 的 `current_pid`。
+                mode (str): `rendered` 发送渲染图，`screenshot` 发送网页截图。
             """
 
             qq_id = str(event.get_sender_id())
