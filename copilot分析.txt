@@ -1,68 +1,110 @@
-二、从 last test.txt 看到的真实问题（按影响度）
-1) P0：session 条件串味（你说的“session 混乱”是成立的）
-日志证据： 在“LCA紫题”后又说“状压DP蓝题”，实际请求 URL 出现：
-• tag=211（LCA）+ tag=464（状压DP）同时存在
-这说明第二轮本应“新需求替换”，却被当成“在旧条件上追加”。
-根因定位：
-• problem_lookup.py 里 should_merge_luogu_lookup_context / merge_luogu_lookup_context 对“再来一道”的语义偏向“继承旧条件”
-• 缺少“新旧标签无交集时强制重置”的规则
- 
-2) P0：引用图片导致 400 错误（但流程被容错继续）
-日志证据： unknown variant 'image_url', expected 'text'（core.astr_main_agent）
-含义：
-• 请求体里出现 image_url part，但当前模型/通道只接受 text part
-• 插件现在能检测“quoted image context”，但主要是提示，没有彻底在发送前清理该图片 part
-结论：
-• 这是 Core/Provider 兼容问题 + 插件可做前置清理兜底
-• 不是“完全阻断”，但会造成报错噪音和额外耗时
- 
-3) P1：速度慢（主要是网页链路开销+重复探测）
-从日志看慢点主要在：
-• 题库页加载 + DOM 稳定等待
-• _detect_page_size 重复执行
-• 深页定位（如第50题）时再次检测分页与跳页开销
-功能“能完成”，但交互体感慢。
- 
-三、当前链路是否可用
-可用性结论：主功能通路是通的（能筛题、能第N题、能发题面、能看图）。
-当前主要是稳定性和交互一致性问题，不是“完全不可用”。
- 
-四、下一步修改建议（完整优先级）
-P0（本轮必须做）
-1. 修复“新需求被错误合并”
-◦ 文件：luogu/problem_lookup.py
-◦ 函数：should_start_new_luogu_lookup、should_merge_luogu_lookup_context、merge_luogu_lookup_context
-◦ 改法要点：
-■ 当用户表达“再来一道 + 新难度/新标签”时优先判定为新查询
-■ 若 old_tags ∩ new_tags == ∅，直接放弃旧 tags，不做合并
-2. 引用图片请求前清洗 image part
-◦ 文件：main.py
-◦ 位置：on_llm_request + _message_has_quoted_image_context 附近
-◦ 改法要点：
-■ 检测到引用图片后，在提交给 LLM 前移除/降级 image_url 内容
-■ 保留用户提示（“本次按文本处理”），但不要让原始 image part 进模型请求
- 
-P1（建议紧跟）
-3. 减少分页探测重复与回退抖动
-◦ 文件：luogu/problem_fetcher.py
-◦ 函数：_detect_page_size、navigate_to_problem
-◦ 改法要点：
-■ 同一筛选请求内复用已探测 page_size
-■ 深页跳转后二次探测失败时做轻量重试并记录明确 fallback 原因
-4. 收紧普通聊天工具放行策略
-◦ 文件：main.py
-◦ 函数：on_llm_request
-◦ 改法要点：
-■ 首轮默认只放 luogu_problem_search
-■ 仅在已选中题且用户明确请求时放 statement/image
-■ 减少一次消息多工具并发导致的冗余路径
- 
+① “session 情景丢失了吗？”
+大概率不是 session 丢失，而是第二次“图也来”没有触发工具链。
+
+从日志看：
+
+15:33:48 已记录：remembered selected problem: pid=P1600（session 里有当前题）
+15:34:09 用户说“图也来”后，没有出现 [Luogu LLM] enforced luogu toolset...、Agent 使用工具: ['luogu_problem_image'] 这类日志
+只出现了普通回复 “稍等，我截个图给你”，随后也没有截图工具执行结果
+=> 说明是意图路由/工具放行没命中，不是 session 本身没了。
+（和前一轮“看看图”不同：那次虽然有 400 噪音，但后续确实调用了 luogu_problem_image 并成功发图。）
+
+② “操作还是太慢”
+你这个感受是对的，慢点主要在：
+
+ProblemFetcher 的网页链路（打开页面 + 等待 + 抓取）
+_detect_page_size 检测和深页定位流程
+“随机/选题后自动接题面”的多工具串行（search -> statement）带来的额外耗时
+有时还叠加引用图 400 错误的额外处理噪音
+1) workspace 分支关键结构与职责（核心部分）
+仓库（origin/workspace）核心文件：
+
+/home/runner/work/astrbot-luogu-fetcher/astrbot-luogu-fetcher/astrbot-luogu-fetcher/main.py
+
+插件主入口、LLM 工具路由、会话管理
+关键段：
+_message_has_quoted_image_context（约 1997）
+_sanitize_quoted_image_request（约 2097）
+on_llm_request（约 2427）
+/home/runner/work/astrbot-luogu-fetcher/astrbot-luogu-fetcher/astrbot-luogu-fetcher/luogu/problem_lookup.py
+
+普通聊天筛题的语义判断与上下文合并
+关键函数：
+should_merge_luogu_lookup_context（198）
+should_start_new_luogu_lookup（228）
+merge_luogu_lookup_context（254）
+/home/runner/work/astrbot-luogu-fetcher/astrbot-luogu-fetcher/astrbot-luogu-fetcher/luogu/problem_fetcher.py
+
+Playwright 题库访问、分页、选题跳转、截图
+关键函数：
+_detect_page_size（208）
+navigate_to_problem（251）
+2) 主流程（普通聊天选题链路）
+main.py:on_llm_request
+→ 决定是否强制放行 luogu 工具（search/statement/image）
+→ luogu_problem_search（内部到 problem_lookup.py）
+→ problem_lookup.py 决策“新查询还是继承上下文”
+→ 调 problem_fetcher.py 做网页筛题/选题
+→ 回写 session（current_pid、list_url、tags、difficulty 等）
+→ 若策略允许再调用 statement/image。
+
+3) 对照 last test.txt 的逐条诊断
+事件A：看看图（15:32:07）
+出现 400 unknown variant image_url（Core 层）
+但随后插件照常触发 luogu_problem_image，并成功截图 P1685
+结论：这是“引用图兼容性噪音 + 插件后续容错成功”，不是功能完全失败。
+
+事件B：再另外来一道LCA紫题 + 来第一道
+从日志看筛题与选题都正确（tag=211、选中 P1600）
+结论：这段会话是通的，session 正常更新。
+
+事件C：图也来（15:34:09）
+未看到 luogu 工具强制放行日志，也未看到 luogu_problem_image 执行日志
+只发了自然语言“稍等，我截个图给你”，最终未发图
+根因推断（高置信）：
+该表达“图也来”没有稳定命中 follow-up image 意图，导致没走工具链。
+不是 session 丢失，是“路由没打到工具”。
+
+4) 下一步修改建议（最小改动，按优先级）
+P0（必须先做）
+P0-1：修复“图也来/图呢”类追问漏触发工具
+目标：凡是“当前 session 已有 current_pid”且用户在追问图，必须稳进 luogu_problem_image。
+文件：/home/runner/work/astrbot-luogu-fetcher/astrbot-luogu-fetcher/astrbot-luogu-fetcher/main.py
+改动点：
+
+扩充 follow-up image 词表（如“图也来”“图呢”“来图”“上图”“发图”）
+增加兜底规则：
+若存在 luogu session 且 current_pid 有值
+且消息是短追问（如“图呢”）/含图意图关键词
+→ 强制 tool_names = ['luogu_problem_image'] 副作用：可能把极少数非洛谷“图”请求误判为洛谷图。
+缓解：只有“有 luogu current_pid”才启用兜底。
+验证：复测 题面发过去了 -> 图也来 -> 图呢，确认每次都有工具执行日志。
+P0-2：优化“引用图”兼容噪音处理说明（插件侧可控部分）
+目标：减少用户感知到的 400 噪音，至少让行为可预期。
+文件：/home/runner/work/astrbot-luogu-fetcher/astrbot-luogu-fetcher/astrbot-luogu-fetcher/main.py
+改动点：
+
+在检测到引用图片上下文时，统一走“文本追问 + 工具执行”路径，并附简短提示（避免误以为失败）
+保持 _sanitize_quoted_image_request 兜底清理 说明：日志中的 400 发生在 Core 更早阶段，插件无法完全根治，但可降低后续混乱感。
+P1（紧跟）
+P1-1：减少不必要的自动串行工具调用（提速最直接）
+目标：降低单轮响应时间。
+文件：/home/runner/work/astrbot-luogu-fetcher/astrbot-luogu-fetcher/astrbot-luogu-fetcher/main.py
+改动点：
+
+对“随机来一道/来第一道”默认只执行 luogu_problem_search，不要默认再接 statement
+用户明确说“发题面/看题面”再触发 statement 收益：可减少一次完整网页抓取/题面获取开销。
+副作用：默认少一步“自动贴题面”，交互风格略变化。
+验证：对比同一请求前后耗时（日志时间戳）。
+P1-2：分页探测复用（轻量）
+文件：/home/runner/work/astrbot-luogu-fetcher/astrbot-luogu-fetcher/astrbot-luogu-fetcher/luogu/problem_fetcher.py
+改动点：
+
+navigate_to_problem 优先使用 page_size_hint
+仅在必要时再 _detect_page_size，避免重复检测 验证：观察 "_detect_page_size 第X次"日志次数下降。
 P2（质量增强）
-5. 补关键回归测试（至少 smoke）
-◦ 重点覆盖：
-■ “LCA紫题 -> 再来状压DP蓝题”不串味
-■ 引用含图消息追问不再触发 image_url 400
-■ “第N题/随机/看图/题面”多轮切换不丢 session
-6. 增强结构化日志
-◦ 在每次选题输出：intent -> merge_or_new -> final filters -> action -> pid
-◦ 便于快速判断是解析问题、合并问题还是抓取问题
+P2-1：增强上下文决策可观测性
+文件：/home/runner/work/astrbot-luogu-fetcher/astrbot-luogu-fetcher/astrbot-luogu-fetcher/luogu/problem_lookup.py
+改动点：
+
+在 should_start_new... / should_merge... / merge... 打结构化日志（decision + reason） 价值：以后定位“串味/误继承”会非常快。
