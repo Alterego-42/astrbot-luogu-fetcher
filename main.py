@@ -2259,7 +2259,22 @@ if _ASTRBOT:
             text = str(message or "").strip()
             return (
                 "截图" in text
-                or any(marker in text for marker in ("看图", "题图", "图片", "图片发出来", "题目图片", "发题图"))
+                or any(
+                    marker in text
+                    for marker in (
+                        "看图",
+                        "题图",
+                        "图片",
+                        "图片发出来",
+                        "题目图片",
+                        "发题图",
+                        "图也来",
+                        "图呢",
+                        "来图",
+                        "上图",
+                        "发图",
+                    )
+                )
             )
 
         def _looks_like_luogu_clarification_reply(self, message: str, session_data: Optional[Dict[str, Any]]) -> bool:
@@ -2462,10 +2477,23 @@ if _ASTRBOT:
             follow_up_random = bool(follow_up and follow_up.get("kind") == "random")
             requests_both_statement_and_image = requests_statement and requests_image
             quoted_image_context = self._message_has_quoted_image_context(event)
+            current_pid = str((luogu_session or {}).get("current_pid") or "").strip().upper()
+            short_image_follow_up = (
+                bool(current_pid)
+                and requests_image
+                and len(message.strip()) <= 12
+            )
 
             tool_names: list[str]
             sequence_hint: str
-            if follow_up_select and requests_both_statement_and_image:
+            if short_image_follow_up:
+                tool_names = ["luogu_problem_image"]
+                sequence_hint = (
+                    "当前 Luogu session 已经选中过具体题目，"
+                    "这是一个简短的追问式看图请求。"
+                    "直接调用 `luogu_problem_image`，并沿用当前 session 的 `current_pid`。"
+                )
+            elif follow_up_select and requests_both_statement_and_image:
                 tool_names = ["luogu_problem_search", "luogu_problem_statement", "luogu_problem_image"]
                 sequence_hint = (
                     "这是“先选第 N 题，再同时发题面和题图”的请求。"
