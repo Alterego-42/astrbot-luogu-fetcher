@@ -57,22 +57,28 @@ from luogu.problem_lookup import (
     format_luogu_problem_tool_result,
     lookup_luogu_problem_by_pid,
     lookup_luogu_problems,
-    lookup_luogu_problems_from_list_url,
     merge_luogu_lookup_context,
     normalize_problem_lookup_tags,
     preflight_luogu_problem_tool_action,
     run_problem_async,
     should_start_new_luogu_lookup,
-    should_merge_luogu_lookup_context,
+)
+from luogu.intent_parser import parse_luogu_workflow_intent
+from luogu.llm_search_workflow import (
+    build_default_lookup_intent,
+    derive_luogu_search_follow_up,
+    execute_luogu_follow_up,
+    format_luogu_session_snapshot,
+    remember_luogu_clarification_session,
+    remember_luogu_lookup_session,
+    render_luogu_lookup_candidate_list,
+    resolve_luogu_target_pid,
 )
 from luogu.planner import (
-    detect_selected_image_follow_up_intent,
     plan_luogu_workflow,
 )
 from luogu.session_events import (
-    EVENT_CANDIDATES_UPDATED,
     EVENT_IMAGE_SENT,
-    EVENT_PROBLEM_SELECTED,
     EVENT_STATEMENT_SENT,
     append_session_event,
     replay_luogu_session_state,
@@ -2192,100 +2198,6 @@ if _ASTRBOT:
 
             return None
 
-        def _remember_luogu_lookup(
-            self,
-            event: AstrMessageEvent,
-            *,
-            query: str,
-            difficulty: Optional[int],
-            tags: list[str],
-            keyword: Optional[str],
-            unresolved_tags: list[str],
-            limit: int,
-            payload: Dict[str, Any],
-        ) -> None:
-            session = self._get_luogu_llm_session(event) or {}
-            session.update(
-                {
-                    "query": query,
-                    "difficulty": difficulty,
-                    "tags": tags,
-                    "keyword": keyword,
-                    "unresolved_tags": unresolved_tags,
-                    "limit": limit,
-                    "total": int(payload.get("total") or 0),
-                    "page_size": int(payload.get("page_size") or 0),
-                    "list_url": payload.get("list_url"),
-                    "summaries": payload.get("summaries") or [],
-                    "shown_count": len(payload.get("summaries") or []),
-                }
-            )
-            self._append_luogu_session_event(
-                session,
-                EVENT_CANDIDATES_UPDATED,
-                total=int(payload.get("total") or 0),
-                list_url=payload.get("list_url"),
-                difficulty=difficulty,
-                tags=tags,
-                keyword=keyword,
-            )
-            chosen = payload.get("chosen") or {}
-            if chosen:
-                session["current_pid"] = chosen.get("pid")
-                session["current_title"] = chosen.get("title")
-                self._append_luogu_session_event(
-                    session,
-                    EVENT_PROBLEM_SELECTED,
-                    pid=chosen.get("pid"),
-                    title=chosen.get("title"),
-                    list_url=payload.get("list_url"),
-                )
-                logger.info(
-                    "[Luogu LLM] remembered selected problem: pid=%s title=%s",
-                    session.get("current_pid"),
-                    session.get("current_title"),
-                )
-            else:
-                session.pop("current_pid", None)
-                session.pop("current_title", None)
-                session.pop("current_md", None)
-                logger.info("[Luogu LLM] cleared stale selected problem after candidate-only lookup")
-            session.pop("pending_clarification", None)
-            self._set_luogu_llm_session(event, session)
-
-        def _remember_luogu_clarification(
-            self,
-            event: AstrMessageEvent,
-            *,
-            original_query: str,
-            question: str,
-            partial_intent: Optional[Dict[str, Any]] = None,
-        ) -> None:
-            session = self._get_luogu_llm_session(event) or {}
-            session["pending_clarification"] = {
-                "original_query": str(original_query or "").strip(),
-                "question": str(question or "").strip(),
-                "partial_intent": dict(partial_intent or {}),
-            }
-            self._set_luogu_llm_session(event, session)
-
-        def _render_luogu_lookup_candidate_list(self, session_data: Dict[str, Any]) -> str:
-            payload = {
-                "success": True,
-                "total": int(session_data.get("total") or 0),
-                "list_url": session_data.get("list_url"),
-                "summaries": list(session_data.get("summaries") or []),
-            }
-            return format_luogu_problem_tool_result(
-                query=str(session_data.get("query") or "当前洛谷筛选条件"),
-                action="search",
-                difficulty=session_data.get("difficulty"),
-                tags=list(session_data.get("tags") or []),
-                keyword=session_data.get("keyword"),
-                unresolved_tags=list(session_data.get("unresolved_tags") or []),
-                payload=payload,
-            )
-
         def _message_requests_problem_statement(self, message: str) -> bool:
             text = str(message or "").strip()
             return any(marker in text for marker in ("题面", "转发", "合并消息", "完整题面", "markdown", "原文"))
@@ -2325,62 +2237,6 @@ if _ASTRBOT:
                 "难度", "标签", "来源", "蓝题", "紫题", "绿题", "黄题", "橙题", "红题", "黑题",
             )
             return any(marker in text for marker in markers)
-
-        def _format_luogu_session_snapshot(self, session_data: Optional[Dict[str, Any]]) -> str:
-            if not session_data:
-                return "当前没有活跃的洛谷普通聊天 session。若要开始新的选题流程，请先调用 `luogu_problem_search`。"
-
-            filters: list[str] = []
-            difficulty = session_data.get("difficulty")
-            if isinstance(difficulty, int):
-                if difficulty == 0:
-                    filters.append("难度=不限")
-                elif 1 <= difficulty <= len(DIFFICULTY_NAMES):
-                    filters.append(f'难度={DIFFICULTY_NAMES[difficulty - 1]}')
-            if session_data.get("tags"):
-                filters.append("标签=" + "、".join(str(tag) for tag in session_data.get("tags") or []))
-            if session_data.get("keyword"):
-                filters.append(f'关键词={session_data.get("keyword")}')
-
-            parts = [
-                f'当前筛选条件：{"；".join(filters) if filters else "未记录"}',
-                f'当前候选总数：{int(session_data.get("total") or 0)}',
-                f'当前列表链接：{session_data.get("list_url") or "无"}',
-            ]
-            current_pid = str(session_data.get("current_pid") or "").strip()
-            current_title = str(session_data.get("current_title") or "").strip()
-            if current_pid:
-                parts.append(f'当前已选中题目：{current_pid} {current_title}'.strip())
-            else:
-                parts.append("当前还没有选中题目。")
-            pending = session_data.get("pending_clarification") or {}
-            if pending.get("question"):
-                parts.append(f'当前待补充信息：{pending.get("question")}')
-            return "\n".join(parts)
-
-        def _resolve_luogu_target_pid(self, event: AstrMessageEvent, pid: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-            requested_pid = extract_problem_id(str(pid or "").strip())
-            if not requested_pid:
-                requested_pid = extract_problem_id(getattr(event, "message_str", "") or "")
-            if requested_pid:
-                logger.info("[Luogu LLM] resolved target pid from explicit input: %s", requested_pid)
-                return requested_pid, None
-
-            session = self._get_luogu_llm_session(event) or {}
-            current_pid = str(session.get("current_pid") or "").strip().upper()
-            if current_pid:
-                normalized_pid = current_pid if current_pid.startswith("P") else f'P{current_pid}'
-                logger.info("[Luogu LLM] resolved target pid from session current_pid: %s", normalized_pid)
-                return normalized_pid, None
-            total = int(session.get("total") or 0)
-            shown = int(session.get("shown_count") or 0)
-            if total > 0:
-                return None, (
-                    f"当前会话只有候选列表，还没有真正选中题目。"
-                    f"请先指定“第N题”或“随机来一道”完成选题。"
-                    f"这一轮候选共 {total} 道，当前展示了前 {shown} 道。"
-                )
-            return None, "当前会话还没有选中的题目。请先用 `luogu_problem_search` 选出一道题，再调用题面或题图工具。"
 
         async def _send_luogu_problem_forward(
             self,
@@ -2518,119 +2374,36 @@ if _ASTRBOT:
             requests_image = self._message_requests_problem_image(message)
             requests_statement = self._message_requests_problem_statement(message)
             requests_random = self._message_requests_random_problem(message)
-            follow_up_select = bool(follow_up and follow_up.get("kind") == "select")
-            follow_up_random = bool(follow_up and follow_up.get("kind") == "random")
-            requests_both_statement_and_image = requests_statement and requests_image
             quoted_image_context = self._message_has_quoted_image_context(event)
             workflow_session = self._replay_luogu_session_state(luogu_session)
-            current_pid = str((luogu_session or {}).get("current_pid") or "").strip().upper()
-            short_image_follow_up = (
-                bool(current_pid)
-                and requests_image
-                and len(message.strip()) <= 12
+            workflow_intent = parse_luogu_workflow_intent(
+                message=message,
+                session_state=workflow_session,
+                follow_up=follow_up,
+                direct_pid=direct_pid,
+                requests_statement=requests_statement,
+                requests_image=requests_image,
+                requests_random=requests_random,
             )
-            selected_image_intent = detect_selected_image_follow_up_intent(message, workflow_session)
-            selected_image_plan = (
-                plan_luogu_workflow(selected_image_intent, workflow_session)
-                if selected_image_intent
-                else None
-            )
+            workflow_plan = plan_luogu_workflow(workflow_intent, workflow_session)
 
             tool_names: list[str]
             sequence_hint: str
-            if selected_image_plan:
-                tool_names = selected_image_plan.allowed_tools
-                sequence_hint = selected_image_plan.sequence_hint
+            if workflow_plan:
+                tool_names = workflow_plan.allowed_tools
+                sequence_hint = workflow_plan.sequence_hint
                 logger.info(
                     "[Luogu Workflow] planned request: intent=%s state=%s commands=%s",
-                    selected_image_plan.intent.intent.value,
-                    selected_image_plan.workflow_state.value,
-                    [command.name for command in selected_image_plan.commands],
-                )
-            elif short_image_follow_up:
-                tool_names = ["luogu_problem_image"]
-                sequence_hint = (
-                    "当前 Luogu session 已经选中过具体题目，"
-                    "这是一个简短的追问式看图请求。"
-                    "直接调用 `luogu_problem_image`，并沿用当前 session 的 `current_pid`。"
-                )
-            elif follow_up_select and requests_both_statement_and_image:
-                tool_names = ["luogu_problem_search", "luogu_problem_statement", "luogu_problem_image"]
-                sequence_hint = (
-                    "这是“先选第 N 题，再同时发题面和题图”的请求。"
-                    "先调用 `luogu_problem_search` 完成 select，"
-                    "再调用 `luogu_problem_statement` 和 `luogu_problem_image`。"
-                )
-            elif follow_up_select and requests_image:
-                tool_names = ["luogu_problem_search", "luogu_problem_image"]
-                sequence_hint = (
-                    "这是“先选第 N 题，再发题图”的请求。"
-                    "先调用 `luogu_problem_search` 完成 select，"
-                    "确认 session 已写入新的 `current_pid` 后，再调用 `luogu_problem_image`。"
-                )
-            elif follow_up_select and requests_statement:
-                tool_names = ["luogu_problem_search", "luogu_problem_statement"]
-                sequence_hint = (
-                    "这是“先选第 N 题，再发题面”的请求。"
-                    "先调用 `luogu_problem_search` 完成 select，"
-                    "确认 session 已写入新的 `current_pid` 后，再调用 `luogu_problem_statement`。"
-                )
-            elif follow_up_select:
-                tool_names = ["luogu_problem_search", "luogu_problem_statement"]
-                sequence_hint = (
-                    "这是按序号选题阶段。先调用 `luogu_problem_search` 完成 select。"
-                    "如果已经选中了具体题目，再调用 `luogu_problem_statement` 发送题面。"
-                )
-            elif follow_up_random and requests_both_statement_and_image:
-                tool_names = ["luogu_problem_search", "luogu_problem_statement", "luogu_problem_image"]
-                sequence_hint = (
-                    "这是“随机选题后，再同时发题面和题图”的请求。"
-                    "先调用 `luogu_problem_search` 完成 random，"
-                    "再调用 `luogu_problem_statement` 和 `luogu_problem_image`。"
-                )
-            elif follow_up_random and requests_image:
-                tool_names = ["luogu_problem_search", "luogu_problem_image"]
-                sequence_hint = (
-                    "这是“随机选题后，再发题图”的请求。"
-                    "先调用 `luogu_problem_search` 完成 random，"
-                    "确认 session 已写入新的 `current_pid` 后，再调用 `luogu_problem_image`。"
-                )
-            elif follow_up_random:
-                tool_names = ["luogu_problem_search", "luogu_problem_statement"]
-                sequence_hint = (
-                    "这是随机选题阶段。先调用 `luogu_problem_search` 完成 random。"
-                    "如果已经选中了具体题目，再调用 `luogu_problem_statement` 发送题面。"
-                )
-            elif direct_pid and requests_both_statement_and_image:
-                tool_names = ["luogu_problem_statement", "luogu_problem_image"]
-                sequence_hint = "用户已经给出题号，且同时想看题面和题图。先调用 `luogu_problem_statement`，再调用 `luogu_problem_image`。"
-            elif direct_pid and requests_image:
-                tool_names = ["luogu_problem_image"]
-                sequence_hint = "用户已经给出题号且想看图，直接调用 `luogu_problem_image`。"
-            elif direct_pid and (requests_statement or message.strip().upper() == direct_pid):
-                tool_names = ["luogu_problem_statement"]
-                sequence_hint = "用户已经给出题号且想看题面，直接调用 `luogu_problem_statement`。"
-            elif follow_up and follow_up.get("kind") == "image":
-                tool_names = ["luogu_problem_image"]
-                sequence_hint = "这是图片阶段，直接调用 `luogu_problem_image`。用户明确说“截图/官网截图”时传 `mode=\"screenshot\"`，否则用默认渲染图。"
-            elif follow_up and follow_up.get("kind") == "forward":
-                tool_names = ["luogu_problem_statement"]
-                sequence_hint = "这是题面阶段，直接调用 `luogu_problem_statement`。如果参数里没给 pid，就让工具读取当前 session 的 `current_pid`。"
-            elif follow_up and follow_up.get("kind") in ("count", "repeat_candidates"):
-                tool_names = ["luogu_problem_search"]
-                sequence_hint = "这是筛题结果追问阶段，只调用 `luogu_problem_search` 读取当前 session。"
-            elif requests_random:
-                tool_names = ["luogu_problem_search", "luogu_problem_statement"]
-                sequence_hint = (
-                    "用户明确要求随机选题。先调用 `luogu_problem_search` 完成随机选择。"
-                    "只有在搜索结果已经选中了具体题目时，才继续调用 `luogu_problem_statement`。"
+                    workflow_plan.intent.intent.value,
+                    workflow_plan.workflow_state.value,
+                    [command.name for command in workflow_plan.commands],
                 )
             else:
                 tool_names = ["luogu_problem_search"]
                 sequence_hint = (
-                    "这是候选筛题阶段，只调用 `luogu_problem_search`。"
-                    "如果结果只是候选列表、总数或条件说明，不要提前调用题面工具。"
-                    "只有明确选中了具体题目后，后续轮次再调用 `luogu_problem_statement` 或 `luogu_problem_image`。"
+                    "This is still a candidate-search stage. Only call `luogu_problem_search` first. "
+                    "If the result is only a candidate list, total count, or filter explanation, do not call "
+                    "`luogu_problem_statement` or `luogu_problem_image` until a concrete problem is selected."
                 )
 
             tools = []
@@ -2643,7 +2416,7 @@ if _ASTRBOT:
                 req.func_tool = ToolSet(tools)
 
             hint_marker = "[LUOGU_TOOL_POLICY]"
-            session_snapshot = self._format_luogu_session_snapshot(luogu_session)
+            session_snapshot = format_luogu_session_snapshot(luogu_session)
             tool_usage = (
                 "\n工具职责："
                 "\n- `luogu_problem_search(query, limit=10)`：只负责筛题、续筛、追问总数、随机/指定选题，并把结果写回当前 Luogu session。"
@@ -2744,8 +2517,8 @@ if _ASTRBOT:
                     unresolved_tags=[],
                     payload=payload,
                 )
-                self._remember_luogu_lookup(
-                    event,
+                session = remember_luogu_lookup_session(
+                    self._get_luogu_llm_session(event),
                     query=query,
                     difficulty=None,
                     tags=[],
@@ -2754,34 +2527,12 @@ if _ASTRBOT:
                     limit=limit,
                     payload=payload,
                 )
+                self._set_luogu_llm_session(event, session)
                 return result
 
             intent = await parse_jump_natural_language(self.context, event, query, HOT_TAGS)
             if not intent:
-                fallback_keyword = None
-                if not (
-                    session
-                    and should_merge_luogu_lookup_context(query)
-                    and not should_start_new_luogu_lookup(
-                        query,
-                        action="search",
-                        difficulty=None,
-                        tags=[],
-                        keyword=query,
-                        unresolved_tags=[],
-                    )
-                ):
-                    fallback_keyword = query
-                intent = {
-                    'action': 'search',
-                    'difficulty': None,
-                    'tags': [],
-                    'keyword': fallback_keyword,
-                    'index': None,
-                    'need_clarification': False,
-                    'clarification': None,
-                    'reply': None,
-                }
+                intent = build_default_lookup_intent(query, session)
 
             parsed_action = intent.get('action') or 'search'
             parsed_tags, parsed_unresolved_tags = normalize_problem_lookup_tags(intent.get('tags'))
@@ -2795,92 +2546,34 @@ if _ASTRBOT:
                 unresolved_tags=parsed_unresolved_tags,
             )
 
-            follow_up = None if force_new_lookup else self._interpret_luogu_follow_up(query, session)
-            if not follow_up and session:
-                has_new_constraints = bool(
-                    parsed_tags
-                    or parsed_unresolved_tags
-                    or parsed_keyword
-                    or intent.get('difficulty') is not None
-                )
-                if parsed_action == "random" and not has_new_constraints:
-                    follow_up = {"kind": "random"}
-                elif parsed_action == "select" and not has_new_constraints and intent.get("index"):
-                    follow_up = {"kind": "select", "index": intent.get("index")}
-                elif parsed_action in ("show_image", "show_screenshot") and session.get("current_pid"):
-                    follow_up = {
-                        "kind": "image",
-                        "mode": "screenshot" if parsed_action == "show_screenshot" else "rendered",
-                    }
+            follow_up = derive_luogu_search_follow_up(
+                query=query,
+                session=session,
+                force_new_lookup=force_new_lookup,
+                parsed_action=parsed_action,
+                parsed_tags=parsed_tags,
+                parsed_unresolved_tags=parsed_unresolved_tags,
+                parsed_keyword=parsed_keyword,
+                difficulty=intent.get("difficulty"),
+                index=intent.get("index"),
+                interpret_follow_up=self._interpret_luogu_follow_up,
+            )
             if follow_up and session:
-                kind = follow_up["kind"]
-                if kind == "count":
-                    total = int(session.get("total") or 0)
-                    shown = int(session.get("shown_count") or 0)
-                    return f"上一轮洛谷筛选条件共找到 {total} 道题。上次只展示了前 {shown} 道候选，不是总数。"
-
-                if kind in ("random", "select"):
-                    session_list_url = session.get("list_url")
-                    if session_list_url:
-                        payload = await run_problem_async(
-                            cfile,
-                            lookup_luogu_problems_from_list_url,
-                            list_url=session_list_url,
-                            total=session.get("total"),
-                            page_size=session.get("page_size"),
-                            limit=session.get("limit") or limit,
-                            action="random" if kind == "random" else "select",
-                            index=follow_up.get("index"),
-                        )
-                    else:
-                        payload = await run_problem_async(
-                            cfile,
-                            lookup_luogu_problems,
-                            difficulty=session.get("difficulty"),
-                            tags=session.get("tags") or [],
-                            keyword=session.get("keyword"),
-                            limit=session.get("limit") or limit,
-                            action="random" if kind == "random" else "select",
-                            index=follow_up.get("index"),
-                        )
-                    self._remember_luogu_lookup(
-                        event,
-                        query=query,
-                        difficulty=session.get("difficulty"),
-                        tags=session.get("tags") or [],
-                        keyword=session.get("keyword"),
-                        unresolved_tags=session.get("unresolved_tags") or [],
-                        limit=session.get("limit") or limit,
-                        payload=payload,
-                    )
-                    return format_luogu_problem_tool_result(
-                        query=query,
-                        action="random" if kind == "random" else "select",
-                        difficulty=session.get("difficulty"),
-                        tags=session.get("tags") or [],
-                        keyword=session.get("keyword"),
-                        unresolved_tags=session.get("unresolved_tags") or [],
-                        payload=payload,
-                    )
-
-                if kind == "repeat_candidates":
-                    return self._render_luogu_lookup_candidate_list(session)
-
-                current_pid = session.get("current_pid")
-                if not current_pid:
-                    return "当前还没有选中的题目。请先让我检索并选出一道题，再调用题面或题图工具。"
-
-                if kind == "forward":
-                    return f"当前会话已选中 {current_pid}。请改为调用 `luogu_problem_statement(pid={current_pid!r})` 发送题面。"
-
-                if kind == "image":
-                    mode = follow_up.get("mode") or "rendered"
-                    return f"当前会话已选中 {current_pid}。请改为调用 `luogu_problem_image(pid={current_pid!r}, mode={mode!r})` 发送题图。"
-
+                follow_up_result, updated_session = await execute_luogu_follow_up(
+                    cfile=cfile,
+                    query=query,
+                    limit=limit,
+                    session=session,
+                    follow_up=follow_up,
+                )
+                if updated_session is not None:
+                    self._set_luogu_llm_session(event, updated_session)
+                if follow_up_result:
+                    return follow_up_result
             if intent.get('need_clarification'):
                 clarification = intent.get('clarification') or '需求还不够明确，请补充题目的难度、标签或关键词。'
-                self._remember_luogu_clarification(
-                    event,
+                session = remember_luogu_clarification_session(
+                    self._get_luogu_llm_session(event),
                     original_query=query,
                     question=clarification,
                     partial_intent={
@@ -2889,6 +2582,7 @@ if _ASTRBOT:
                         "keyword": parsed_keyword,
                     },
                 )
+                self._set_luogu_llm_session(event, session)
                 return clarification
 
             action = intent.get('action') or 'search'
@@ -2932,8 +2626,8 @@ if _ASTRBOT:
                 action=action,
                 index=intent.get('index'),
             )
-            self._remember_luogu_lookup(
-                event,
+            session = remember_luogu_lookup_session(
+                self._get_luogu_llm_session(event),
                 query=query,
                 difficulty=difficulty,
                 tags=tags,
@@ -2942,6 +2636,7 @@ if _ASTRBOT:
                 limit=limit,
                 payload=payload,
             )
+            self._set_luogu_llm_session(event, session)
             return format_luogu_problem_tool_result(
                 query=query,
                 action=action,
@@ -2965,7 +2660,11 @@ if _ASTRBOT:
             if not Path(cfile).exists():
                 return "该用户还没有绑定洛谷账号，请先提醒他使用 /luogu bind 绑定后再调用这个工具。"
 
-            resolved_pid, error = self._resolve_luogu_target_pid(event, pid)
+            resolved_pid, error = resolve_luogu_target_pid(
+                requested_pid=pid,
+                event_message=getattr(event, "message_str", "") or "",
+                session_data=self._get_luogu_llm_session(event),
+            )
             if error:
                 return error
             return await self._send_luogu_problem_forward(event, cfile, resolved_pid or "")
@@ -2989,7 +2688,11 @@ if _ASTRBOT:
             if not Path(cfile).exists():
                 return "该用户还没有绑定洛谷账号，请先提醒他使用 /luogu bind 绑定后再调用这个工具。"
 
-            resolved_pid, error = self._resolve_luogu_target_pid(event, pid)
+            resolved_pid, error = resolve_luogu_target_pid(
+                requested_pid=pid,
+                event_message=getattr(event, "message_str", "") or "",
+                session_data=self._get_luogu_llm_session(event),
+            )
             if error:
                 return error
 
