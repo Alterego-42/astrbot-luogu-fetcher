@@ -175,6 +175,12 @@ def _contains_marker(text: str, markers: Tuple[str, ...]) -> bool:
     return any(marker in compact for marker in markers)
 
 
+def _tags_are_disjoint(previous_tags: List[str], current_tags: List[str]) -> bool:
+    previous = {str(tag).strip().lower() for tag in previous_tags or [] if str(tag).strip()}
+    current = {str(tag).strip().lower() for tag in current_tags or [] if str(tag).strip()}
+    return bool(previous and current and previous.isdisjoint(current))
+
+
 def _resolve_session_tags_for_removal(query: str, session_tags: List[str]) -> List[str]:
     raw = str(query or "").strip()
     compact = _compact_text(raw)
@@ -306,6 +312,16 @@ def merge_luogu_lookup_context(
     if clear_keyword:
         merged_keyword = None
 
+    disjoint_tag_refresh = (
+        not add_mode
+        and not remove_mode
+        and not replace_mode
+        and _tags_are_disjoint(merged_tags, current["tags"])
+    )
+    if disjoint_tag_refresh:
+        merged_tags = []
+        merged_unresolved = []
+
     if current["tags"] or current["unresolved_tags"]:
         if remove_mode:
             to_remove = set(current["tags"])
@@ -314,6 +330,9 @@ def merge_luogu_lookup_context(
             unresolved_to_remove = set(current["unresolved_tags"])
             merged_unresolved = [tag for tag in merged_unresolved if tag not in unresolved_to_remove]
         elif replace_mode and mentions_tags:
+            merged_tags = current["tags"]
+            merged_unresolved = current["unresolved_tags"]
+        elif disjoint_tag_refresh:
             merged_tags = current["tags"]
             merged_unresolved = current["unresolved_tags"]
         else:
