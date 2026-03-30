@@ -2521,7 +2521,7 @@ if _ASTRBOT:
         # ── /luogu ────────────────────────────────────────────
 
         @filter.llm_tool(name="luogu_problem_search")
-        async def luogu_problem_search(self, event: AstrMessageEvent, query: Optional[str] = None, limit: int = 10) -> str:
+        async def luogu_problem_search(self, event: AstrMessageEvent, query: str = "", limit: int = 10) -> str:
             """只负责普通聊天里的洛谷筛题、续筛、总数追问和选题。
 
             Args:
@@ -2774,7 +2774,7 @@ if _ASTRBOT:
             )
 
         @filter.llm_tool(name="luogu_problem_statement")
-        async def luogu_problem_statement(self, event: AstrMessageEvent, pid: Optional[str] = None) -> str:
+        async def luogu_problem_statement(self, event: AstrMessageEvent, pid: str = "") -> str:
             """只负责根据题号或当前 session 发送题面。
 
             Args:
@@ -2795,7 +2795,7 @@ if _ASTRBOT:
         async def luogu_problem_image(
             self,
             event: AstrMessageEvent,
-            pid: Optional[str] = None,
+            pid: str = "",
             mode: str = "rendered",
         ) -> str:
             """只负责根据题号或当前 session 发送题图/截图。
