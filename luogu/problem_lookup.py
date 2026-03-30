@@ -463,7 +463,11 @@ def lookup_luogu_problems(
             chosen_index = index or 1
 
         chosen_index = max(1, min(chosen_index, payload['total']))
-        pid = fetcher.navigate_to_problem(chosen_index, list_url=result.get('list_url'))
+        pid = fetcher.navigate_to_problem(
+            chosen_index,
+            list_url=result.get('list_url'),
+            page_size_hint=result.get('page_size'),
+        )
         if pid:
             detail = fetcher.get_problem_detail(pid)
             payload['chosen'] = {
@@ -517,7 +521,11 @@ def lookup_luogu_problems_from_list_url(
             chosen_index = index or 1
 
         chosen_index = max(1, min(chosen_index, current_total))
-        pid = fetcher.navigate_to_problem(chosen_index, list_url=payload["list_url"])
+        pid = fetcher.navigate_to_problem(
+            chosen_index,
+            list_url=payload["list_url"],
+            page_size_hint=result.get("page_size"),
+        )
         if pid:
             detail = fetcher.get_problem_detail(pid)
             payload["chosen"] = {
