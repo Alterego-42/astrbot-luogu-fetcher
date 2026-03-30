@@ -1376,7 +1376,11 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
 
                 if position:
                     # 传入 list_url 用于 page 失效时恢复
-                    resolved_pid = fetcher.navigate_to_problem(position, list_url=state.get('list_url'))
+                    resolved_pid = fetcher.navigate_to_problem(
+                        position,
+                        list_url=state.get('list_url'),
+                        page_size_hint=state.get('page_size'),
+                    )
                     if not resolved_pid:
                         return None, None, None, f'❌ 跳转题目失败（page_size={state.get("page_size")}, list_url={state.get("list_url")}）'
                 import re as _re
@@ -2110,6 +2114,7 @@ if _ASTRBOT:
                     "unresolved_tags": unresolved_tags,
                     "limit": limit,
                     "total": int(payload.get("total") or 0),
+                    "page_size": int(payload.get("page_size") or 0),
                     "list_url": payload.get("list_url"),
                     "summaries": payload.get("summaries") or [],
                     "shown_count": len(payload.get("summaries") or []),
@@ -2649,6 +2654,7 @@ if _ASTRBOT:
                             lookup_luogu_problems_from_list_url,
                             list_url=session_list_url,
                             total=session.get("total"),
+                            page_size=session.get("page_size"),
                             limit=session.get("limit") or limit,
                             action="random" if kind == "random" else "select",
                             index=follow_up.get("index"),

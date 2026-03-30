@@ -1,74 +1,88 @@
-插件主流程已经比较完整，核心功能可用。
-• 最新测试里真正稳定复现的问题主要有 2 类：
-i. 引用图片导致 provider 400（image_url vs text）：发生在 AstrBot Core 层，插件层只能做兜底和降噪。
-ii. LLM 工具参数 query 经常没传进去：日志里反复出现 参数：{}，目前靠 event.message_str fallback 扛住，属于“能跑但不稳”。
-• 你担心的“串题（旧题面串到新筛选）”在当前这版代码里已做了清理（_remember_luogu_lookup 在 candidate-only 场景会 pop current_pid/current_title/current_md），并且 last test.txt 里“线段树第一题”也确实落到了 P1186，说明这个点当前已明显改善。
-
-
-2) 基于 last test.txt 的真实行为分析
-A. 正常链路（通过）
-“来一道LCA紫题” → 返回 50 道候选（正常）
-“随便来一道” → 选中 P4074，题面发送成功（正常）
-“图片也发过来” → 题图发送成功（正常）
-“再找线段树紫题” → 返回 350 道候选（正常）
-“第一题” → 成功选中 P1186，题面发送成功（正常）
-“看图” → P1186 截图发送成功（正常）
-B. 反复出现的问题（高价值）
-Core 报错：引用图片失败
-日志关键字：
-core.astr_main_agent:574
-unknown variant image_url, expected text
-说明：引用链里含图片 part，provider 是 text-only，不接受 image_url。
-特征：报错后插件链路仍继续执行，多数场景不致命，但会污染日志、影响稳定性观感。
-tool 参数丢失
-日志中多次出现：
-使用工具：luogu_problem_search，参数：{}
-随后 main.py 打印 recovered missing query from event.message_str
-说明：工具签名与 runner 参数注入机制存在兼容缝隙，当前靠 fallback 顶住。
-工具调度偏“保守冗余”
-默认经常放开 search + statement，导致在只有候选时也会尝试 statement，然后返回“还没选中题目”提示。
-功能上没坏，但会增加一次无效工具调用和一点延迟。
-3) 文档/元数据一致性问题（应尽快收口）
-README.md 写的是更新日志 v1.2.0；
-metadata.yaml 还是 version: v0.2.0，author/repo 也是模板值（YourName / yourname）。
-这会直接影响发布识别与安装端感知，建议尽快同步。
-4) 下一步修改建议（按优先级）
-P0（先做，影响稳定性与可维护性）
-加“引用图片失败”插件侧降级提示（非根治，但能兜住体验）
-文件：/home/runner/work/astrbot-luogu-fetcher/astrbot-luogu-fetcher/astrbot-luogu-fetcher/main.py（on_llm_request 附近）
-建议：
-
-检测消息是否“引用+图片语义”，在 text-only provider 场景给出明确提示：“请不要引用图片，直接文本重发需求”。
-保持 luogu tool 路由照常进行，避免用户误判为插件崩了。
-备注：根治要在 AstrBot Core 做 image part 过滤。
-收紧默认工具放行策略，减少无效 statement 调用
-位置：on_llm_request 的 tool_names 分支
-建议：
-
-首轮普通筛题只放 luogu_problem_search；
-只有“明确选题/随机/给定PID/显式题面诉求且已有 current_pid”才放 statement。
-收益：降低延迟和噪音，日志更干净。
-P1（本周建议完成）
-修复/增强 query 参数注入兼容性
-位置：main.py 内 @filter.llm_tool(name="luogu_problem_search")
-建议：
-
-评估改为更显式的参数 schema（或按 AstrBot 推荐写法补全 tool 参数定义），减少 参数：{} 发生率；
-fallback 保留，作为兜底。
-目标：日志里不再频繁靠 recovered missing query。
-给 luogu 普通聊天 session 增加 TTL
-位置：_remember_luogu_lookup / _resolve_luogu_target_pid
-建议：
-
-记录 updated_at，超时（如 10~20 分钟）后要求重新选题。
-收益：减少跨长会话的上下文污染概率。
-P2（优化项）
-减少 current_md 长文本驻留
-建议按 PID + 短 TTL 缓存，或不长期放 session。
-增强结构化日志
-每次题面/题图输出前打印 resolved_pid 与来源（explicit/session）。
-5) 建议你下一轮实际改动顺序（最小变更路径）
-main.py：先改 tool 路由收敛（P0-2）
-main.py：加引用图片的降级提示（P0-1）
-metadata.yaml + README.md：版本与 repo/author 对齐
-再跑你现有回归用例
+二、last test.txt 最近测试复盘（关键）
+你在文件开头给出的结论是：
+1. 引用图片处理失败日志仍存在
+2. 整体处理偏慢，疑似存在重复步骤
+这两个结论都被日志证实。
+ 
+A. 通过项（功能可用）
+从完整聊天+日志看，主要链路是通的：
+• “LCA 紫题”能正确筛出候选（50）
+• “第一题”能选中并发送题面（P1600）
+• “线段树紫题 来源IOI/ICPC”能筛出大候选（453）
+• “随便来一道”最终也能拿到题面（P1235）
+• “看图”能发送题面截图
+=> 说明：功能正确性基本可用，问题主要集中在稳定性、效率、日志噪音。
+ 
+B. 失败/异常项（高优先级）
+1) 引用图片触发 400（重复出现）
+日志特征：
+• core.astr_main_agent:574
+• unknown variant 'image_url', expected 'text'
+判断：
+• 这是 AstrBot Core / provider 请求体格式兼容问题（text-only provider 不接受 image_url part）
+• 插件侧无法根治，但可做体验降级提示和降噪兜底
+2) 随机跳题过程中的分页检测不稳定
+日志特征：
+• 同一流程里 _detect_page_size 多次执行
+• page=5 时出现 题目链接=0，随后回退到 20/页
+• 最后仍能返回结果，但中间有警告和冗余流程
+判断：
+• 页面动态加载/反爬触发导致 DOM 抽取瞬时失败
+• 当前检测与回退策略可“保命”，但效率和确定性不足
+ 
+C. 性能慢的真实来源（从日志看）
+你说“太慢+重复步骤”，我认同，来源主要有三类：
+1. 重复 page size 检测
+同一请求内存在重复 _detect_page_size（至少可见两次）
+2. 工具链路冗余调用
+普通聊天 follow-up 时工具放行策略偏宽，容易产生“先搜再判再调”的额外开销
+3. 截图/网页跳转固有耗时
+Playwright流程本身就有秒级开销，需要减少无效前置步骤
+ 
+三、问题归属：插件可修 vs Core侧问题
+Core 侧（插件无法根治）
+• 引用图片时的 image_url 反序列化失败（400）
+◦ 需 AstrBot Core 在入模前过滤/转码消息part
+插件侧（可直接优化）
+• 分页检测重复与回退逻辑鲁棒性
+• 普通聊天 tool 放行策略过宽（导致多余调用）
+• 随机/序号选题时的上下文与缓存命中策略
+• 日志里“恢复/回退”频率高（说明主链路不够稳）
+ 
+四、下一步修改建议（按优先级）
+P0（必须先做）
+1. 收敛普通聊天工具放行策略，减少冗余调用
+◦ 文件：main.py
+◦ 重点：on_llm_request 中 tool_names 决策
+◦ 目标：
+■ 首轮筛题：只放 luogu_problem_search
+■ 明确需要题面/已选中题目：再放 luogu_problem_statement
+■ 看图意图：放 luogu_problem_image
+◦ 收益：直接减少一轮无效tool调用和等待
+2. 给分页检测增加“请求内缓存 + 单次复用”
+◦ 文件：luogu/problem_fetcher.py
+◦ 重点函数：_detect_page_size、跳题相关调用链
+◦ 目标：同一筛选条件/同一请求里不要重复探测 page size
+◦ 收益：减少重复网页解析与延迟
+3. 引用图片异常的插件侧提示兜底
+◦ 文件：main.py
+◦ 目标：检测到引用图片上下文时，给用户清晰提示“请不要带图片引用重发文本”
+◦ 说明：不能根治400，但可显著改善用户感知
+ 
+P1（建议本轮完成）
+1. 随机选题定位鲁棒性增强
+◦ 文件：luogu/problem_fetcher.py
+◦ 目标：
+■ page=N抽取为空时，增加轻量重试和同页二次DOM稳定等待
+■ 失败后 fallback 要可追踪、可解释
+2. 统一“候选总数/展示数量”文案与会话状态
+◦ 文件：main.py + luogu/problem_lookup.py
+◦ 目标：避免“展示前10道”被误解为总数，追问时上下文更稳
+3. 关键路径打点更结构化
+◦ 文件：main.py / problem_fetcher.py
+◦ 目标：每次选题输出 intent -> strategy -> pid，方便定位慢点和错点
+ 
+P2（可选优化）
+1. 对 page=5 这类深页场景做“候选列表先抽样、再精确落点”
+2. 减少 session 内大文本驻留（如 current_md）
+3. 补一组针对“随机/序号/看图追问”的自动化 smoke 测试脚本或回归清单细化

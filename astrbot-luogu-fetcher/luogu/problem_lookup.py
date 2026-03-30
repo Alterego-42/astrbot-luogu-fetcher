@@ -446,6 +446,7 @@ def lookup_luogu_problems(
     payload: Dict[str, Any] = {
         'success': True,
         'total': result.get('total', 0),
+        'page_size': result.get('page_size'),
         'list_url': result.get('list_url'),
         'applied_tags': result.get('applied_tags') or tags,
         'missing_tags': result.get('missing_tags') or [],
@@ -463,7 +464,11 @@ def lookup_luogu_problems(
             chosen_index = index or 1
 
         chosen_index = max(1, min(chosen_index, payload['total']))
-        pid = fetcher.navigate_to_problem(chosen_index, list_url=result.get('list_url'))
+        pid = fetcher.navigate_to_problem(
+            chosen_index,
+            list_url=result.get('list_url'),
+            page_size_hint=result.get('page_size'),
+        )
         if pid:
             detail = fetcher.get_problem_detail(pid)
             payload['chosen'] = {
@@ -482,6 +487,7 @@ def lookup_luogu_problems_from_list_url(
     *,
     list_url: str,
     total: Optional[int],
+    page_size: Optional[int],
     limit: int,
     action: str,
     index: Optional[int],
@@ -495,12 +501,30 @@ def lookup_luogu_problems_from_list_url(
     fetcher.page.goto(list_url, timeout=20000)
     fetcher.page.wait_for_load_state("domcontentloaded", timeout=15000)
 
-    result = fetcher._get_filter_result()
-    current_total = int(result.get("total") or total or 0)
+    stored_total = int(total or 0)
+    stored_page_size = int(page_size or 0)
+    should_reuse_cached_metrics = (
+        action in ("random", "select")
+        and stored_total > 0
+        and stored_page_size > 0
+    )
+
+    if should_reuse_cached_metrics:
+        result = {
+            "total": stored_total,
+            "page_size": stored_page_size,
+            "page_size_detected": stored_page_size,
+        }
+        current_total = stored_total
+    else:
+        result = fetcher._get_filter_result()
+        current_total = int(result.get("total") or stored_total or 0)
+
     summaries = fetcher.extract_problem_summaries(limit=limit)
     payload: Dict[str, Any] = {
         "success": True,
         "total": current_total,
+        "page_size": int(result.get("page_size") or stored_page_size or 0),
         "list_url": fetcher.page.url or list_url,
         "applied_tags": [],
         "missing_tags": [],
@@ -517,7 +541,11 @@ def lookup_luogu_problems_from_list_url(
             chosen_index = index or 1
 
         chosen_index = max(1, min(chosen_index, current_total))
-        pid = fetcher.navigate_to_problem(chosen_index, list_url=payload["list_url"])
+        pid = fetcher.navigate_to_problem(
+            chosen_index,
+            list_url=payload["list_url"],
+            page_size_hint=result.get("page_size"),
+        )
         if pid:
             detail = fetcher.get_problem_detail(pid)
             payload["chosen"] = {

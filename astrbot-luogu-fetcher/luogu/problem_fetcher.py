@@ -39,6 +39,7 @@ class ProblemFetcher:
         self.context = None
         self.page: Optional[Page] = None
         self._playwright = None
+        self._page_size_cache: Dict[str, int] = {}
 
     # ── 生命周期 ──────────────────────────────────────────────
 
@@ -204,12 +205,18 @@ class ProblemFetcher:
             logger.error(f'[Luogu] 筛选失败: {e}')
             return {'success': False, 'message': str(e), 'list_url': None}
 
-    def _detect_page_size(self, max_retries: int = 3) -> int:
+    def _detect_page_size(self, max_retries: int = 3, *, use_cache: bool = True) -> int:
         """
         从当前页动态检测每页题目数量。
 
         添加重试逻辑：标签筛选后页面可能需要额外时间渲染。
         """
+        url = self.page.url if self.page else ""
+        if use_cache and url and url in self._page_size_cache:
+            cached = self._page_size_cache[url]
+            logger.info(f'[Luogu] 复用缓存的 page_size: url={url}, page_size={cached}')
+            return cached
+
         for attempt in range(max_retries):
             try:
                 url = self.page.url
@@ -223,10 +230,14 @@ class ProblemFetcher:
                 logger.info(f'[Luogu] _detect_page_size 第{attempt+1}次: url={url}, 总链接={all_links}, 题目链接={count}')
                 if count >= 10:
                     logger.info(f'[Luogu] 检测到每页 {count} 道题')
+                    if url:
+                        self._page_size_cache[url] = count
                     return count
                 if 0 < count < 10:
                     # 只有 1-9 题时，直接返回实际数量（不用等待重试）
                     logger.info(f'[Luogu] 检测到 {count} 道题（少于1页）')
+                    if url:
+                        self._page_size_cache[url] = count
                     return count
                 if attempt < max_retries - 1:
                     time.sleep(1.5)
@@ -237,13 +248,14 @@ class ProblemFetcher:
         logger.warning(f'[Luogu] _detect_page_size 未能检测到足够题目链接，回退到 20')
         return 20  # 兜底默认值
 
-    def navigate_to_problem(self, index: int, list_url: str = None) -> Optional[str]:
+    def navigate_to_problem(self, index: int, list_url: str = None, page_size_hint: Optional[int] = None) -> Optional[str]:
         """
         跳转到第 index 个题目（从1开始计数）。
 
         Args:
             index: 题目序号（从1开始）
             list_url: 可选，题库列表页 URL（用于 page 失效时重新导航）
+            page_size_hint: 可选，同一请求里之前已检测到的每页题数
 
         Returns:
             题目的 PID（如 'P1001'），或 None 如果失败
@@ -260,8 +272,8 @@ class ProblemFetcher:
                 else:
                     return None
 
-            # 动态检测实际每页题目数量
-            page_size = self._detect_page_size()
+            # 动态检测实际每页题目数量；同一请求里优先复用上游探测结果
+            page_size = int(page_size_hint or 0) or self._detect_page_size()
 
             # 边界保护：处理 index 超出范围的情况
             # 如果 index > 总题目数，取最后一题
@@ -311,7 +323,7 @@ class ProblemFetcher:
             logger.info(f'[Luogu] 随机选择第 {random_index} 题（共 {total} 题）')
 
             # 跳转到该题目
-            return self.navigate_to_problem(random_index)
+            return self.navigate_to_problem(random_index, page_size_hint=result.get('page_size'))
 
         except Exception as e:
             logger.error(f'[Luogu] 随机选题失败: {e}')
@@ -1470,7 +1482,7 @@ def jump_to_problem(
         if not result.get('success'):
             return None, {'error': result.get('message', '筛选失败')}
 
-        pid = fetcher.navigate_to_problem(index)
+        pid = fetcher.navigate_to_problem(index, page_size_hint=result.get('page_size'))
         if not pid:
             return None, {'error': '跳转题目失败'}
 
