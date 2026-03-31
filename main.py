@@ -21,7 +21,6 @@ import sys
 import re
 import json
 import time
-import difflib
 import asyncio
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -57,34 +56,29 @@ from luogu.problem_lookup import (
     format_luogu_problem_tool_result,
     lookup_luogu_problem_by_pid,
     lookup_luogu_problems,
-    merge_luogu_lookup_context,
-    normalize_problem_lookup_tags,
-    preflight_luogu_problem_tool_action,
     run_problem_async,
-    should_start_new_luogu_lookup,
 )
-from luogu.intent_parser import parse_luogu_workflow_intent
+from luogu.request_count import clamp_luogu_request_count
+from luogu.llm_routing_policy import (
+    enforce_luogu_request,
+    plan_luogu_llm_request,
+)
 from luogu.llm_search_workflow import (
-    build_default_lookup_intent,
-    derive_luogu_search_follow_up,
-    execute_luogu_follow_up,
+    execute_luogu_lookup_turn,
     format_luogu_session_snapshot,
-    remember_luogu_clarification_session,
-    remember_luogu_lookup_session,
-    render_luogu_lookup_candidate_list,
-    resolve_luogu_target_pid,
 )
-from luogu.planner import (
-    plan_luogu_workflow,
+from luogu.tool_entry import (
+    normalize_luogu_image_mode,
+    prepare_luogu_problem_display_target,
+    resolve_luogu_bound_cookie_file,
 )
 from luogu.session_events import (
     EVENT_IMAGE_SENT,
     EVENT_STATEMENT_SENT,
     append_session_event,
-    replay_luogu_session_state,
 )
 from luogu.intent_classifier import classify_luogu_routing_intent
-from luogu.tags import ALL_TAGS, DIFFICULTY_NAMES, HOT_TAGS, fuzzy_match_tag, DIFFICULTY_COLORS
+from luogu.tags import HOT_TAGS
 from luogu.chart_generator import (
     generate_summary_card,
     generate_heatmap,
@@ -93,13 +87,50 @@ from luogu.chart_generator import (
     generate_difficulty_cards,
 )
 from luogu.jump_session import (
+    apply_jump_difficulty_input,
+    apply_jump_keyword_input,
+    apply_jump_search_intent_filters,
+    apply_jump_tag_update,
+    build_jump_problem_fallback_messages,
+    build_jump_problem_forward_nodes,
+    choose_jump_random_positions,
     JUMP_HELP_TEXT,
+    format_jump_batch_preview,
+    is_jump_back_to_difficulty_command,
+    is_jump_back_to_keyword_command,
+    is_jump_done_command,
+    is_jump_help_command,
+    is_jump_quit_command,
+    is_jump_random_command,
+    is_jump_show_image_command,
+    is_jump_show_screenshot_command,
+    is_jump_skip_command,
+    is_jump_status_command,
+    looks_like_jump_commandish_input,
+    normalize_jump_tag_list_with_meta,
     render_jump_step,
     render_no_result_prompt,
     render_selected_tags_update,
     render_problem_header,
     render_problem_footer,
-    split_markdown_chunks,
+    resolve_jump_selection_target,
+    suggest_jump_step_command,
+)
+from luogu.jump_runtime import (
+    build_jump_initial_state,
+    clear_jump_selection_state,
+    ensure_jump_cookie_ready,
+    move_jump_to_difficulty_step,
+    move_jump_to_keyword_step,
+    remember_jump_filter_result,
+    remember_jump_problem_artifact,
+)
+from luogu.jump_batch import load_jump_problem_batch, refresh_jump_batch_summaries
+from luogu.jump_playwright import (
+    apply_jump_filters_via_fetcher,
+    ensure_jump_fetcher,
+    load_jump_problem_detail,
+    screenshot_jump_problem,
 )
 from luogu.nl_jump import parse_jump_natural_language
 
@@ -147,90 +178,6 @@ def _userdata_path(qq_id: str) -> Path:
 def _credentials_path(qq_id: str) -> Path:
     """账号密码存储路径（加密）"""
     return CREDENTIALS_DIR / f'cred_{qq_id}.bin'
-
-
-def _compact_lookup_text(text: str) -> str:
-    return "".join(ch.lower() for ch in str(text or "") if ch.isalnum())
-
-
-LUOGU_PROBLEM_DEMAND_MARKERS = (
-    "来一道", "来一题", "来几道", "找一道", "找几道", "选题", "挑题",
-    "推荐题", "推荐几题", "随机来一题", "随机来一道", "出一道", "给我一道",
-    "搜题", "搜一下", "查题", "题目", "跳一道", "跳一题", "跳题",
-    "整一道", "整一题", "做一道", "做一题",
-)
-
-LUOGU_SCOPE_MARKERS = (
-    "洛谷", "luogu", "题库", "后缀自动机", "字典树", "trie", "sam", "图论",
-    "动态规划", "dp", "字符串", "数学", "icpc", "noi", "省选", "模板题",
-    "线段树", "树状数组", "并查集", "最短路", "二分", "生成树", "最小生成树",
-    "次小生成树", "网络流", "蓝题", "紫题", "绿题", "黄题", "橙题", "红题", "黑题",
-)
-
-LUOGU_CLASSIFIER_HINT_MARKERS = (
-    "题", "算法", "数据结构", "竞赛", "oi", "省选", "noi", "ioi", "csp", "icpc",
-    "难度", "标签", "来源", "年份", "地区", "颜色", "蓝题", "紫题", "绿题",
-    "黄题", "橙题", "红题", "黑题",
-)
-
-
-def _has_luogu_problem_demand(text: str) -> bool:
-    return any(marker in text for marker in LUOGU_PROBLEM_DEMAND_MARKERS)
-
-
-def _collect_luogu_scope_hits(text: str) -> list[str]:
-    lowered = str(text or "").strip().lower()
-    compact = _compact_lookup_text(lowered)
-    hits: list[str] = []
-    seen = set()
-
-    def remember(raw: str) -> None:
-        item = str(raw).strip()
-        if not item or item in seen:
-            return
-        seen.add(item)
-        hits.append(item)
-
-    for marker in LUOGU_SCOPE_MARKERS:
-        if marker in lowered:
-            remember(marker)
-
-    for tag in ALL_TAGS:
-        tag_text = str(tag).strip().lower()
-        if len(tag_text) < 2:
-            continue
-        tag_compact = _compact_lookup_text(tag_text)
-        if tag_text in lowered or (tag_compact and tag_compact in compact):
-            remember(tag)
-            if len(hits) >= 24:
-                break
-
-    return hits
-
-
-def _should_consult_luogu_intent_classifier(message: str, scope_hits: list[str]) -> bool:
-    text = (message or "").strip().lower()
-    if not text or text.startswith("/luogu"):
-        return False
-    has_demand = _has_luogu_problem_demand(text)
-    has_problemish_hint = any(marker in text for marker in LUOGU_CLASSIFIER_HINT_MARKERS)
-    return has_demand and (bool(scope_hits) or has_problemish_hint)
-
-
-def _should_nudge_luogu_problem_tool(message: str) -> bool:
-    text = (message or "").strip().lower()
-    if not text or text.startswith("/luogu"):
-        return False
-
-    has_scope = bool(_collect_luogu_scope_hits(text))
-    has_demand = _has_luogu_problem_demand(text)
-    has_problem_id = bool(extract_problem_id(text))
-    if has_problem_id:
-        return True
-    return has_scope and (
-        has_demand
-        or ("题" in text and any(ch in text for ch in ("来", "找", "推", "选", "查", "搜", "跳", "做", "整")))
-    )
 
 
 def _save_credentials(qq_id: str, username: str, password: str) -> bool:
@@ -780,183 +727,13 @@ def _fmt_checkin(result: Dict) -> str:
 # /jump 题库跳转：5步状态机会话
 # ════════════════════════════════════════════════════════════════
 
-# 题面 HTML 渲染模板（备用：用于 html_render / html_to_pic）
-PROBLEM_HTML_TMPL = '''<!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="UTF-8">
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    background: #f5f6fa;
-    padding: 16px;
-  }
-  .card {
-    background: white;
-    border-radius: 10px;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
-    overflow: hidden;
-  }
-  .header {
-    background: linear-gradient(135deg, #1890ff, #722ed1);
-    color: white;
-    padding: 14px 20px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  .pid {
-    background: rgba(255,255,255,0.2);
-    padding: 3px 10px;
-    border-radius: 20px;
-    font-size: 13px;
-    font-weight: 600;
-  }
-  .title {
-    font-size: 17px;
-    font-weight: 600;
-    flex: 1;
-  }
-  .difficulty-badge {
-    padding: 3px 10px;
-    border-radius: 20px;
-    font-size: 12px;
-    font-weight: 600;
-  }
-  .meta {
-    padding: 10px 20px;
-    border-bottom: 1px solid #f0f0f0;
-    display: flex;
-    gap: 16px;
-    font-size: 13px;
-    color: #666;
-    flex-wrap: wrap;
-  }
-  .meta span { display: flex; align-items: center; gap: 4px; }
-  .tags {
-    padding: 10px 20px;
-    border-bottom: 1px solid #f0f0f0;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .tag {
-    background: #e6f7ff;
-    color: #1890ff;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 12px;
-  }
-  .content {
-    padding: 20px;
-    line-height: 1.8;
-    font-size: 15px;
-    color: #222;
-    max-width: 800px;
-  }
-  .content h3 {
-    color: #1890ff;
-    margin: 16px 0 8px;
-    font-size: 15px;
-  }
-  .content h3:first-child { margin-top: 0; }
-  .content p { margin: 8px 0; }
-  .content pre {
-    background: #f7f8fa;
-    border: 1px solid #e8e8e8;
-    border-radius: 6px;
-    padding: 12px;
-    margin: 10px 0;
-    overflow-x: auto;
-    font-size: 13px;
-    line-height: 1.5;
-  }
-  .content code {
-    font-family: "Fira Code", "Cascadia Code", Consolas, monospace;
-    font-size: 13px;
-  }
-  .content ul, .content ol {
-    padding-left: 24px;
-    margin: 8px 0;
-  }
-  .content li { margin: 4px 0; }
-  .content table {
-    border-collapse: collapse;
-    width: 100%;
-    margin: 10px 0;
-  }
-  .content th, .content td {
-    border: 1px solid #e8e8e8;
-    padding: 6px 12px;
-    text-align: left;
-    font-size: 13px;
-  }
-  .content th { background: #f7f8fa; font-weight: 600; }
-  .footer {
-    padding: 10px 20px;
-    border-top: 1px solid #f0f0f0;
-    font-size: 12px;
-    color: #999;
-    text-align: center;
-  }
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="header">
-    <span class="pid">{{ pid }}</span>
-    <span class="title">{{ title }}</span>
-    <span class="difficulty-badge" style="background:{{ diff_bg }};color:{{ diff_color }}">{{ diff_name }}</span>
-  </div>
-  <div class="meta">
-    {% if passed_rate %}<span>📊 通过率 {{ passed_rate }}</span>{% endif %}
-    {% if submit_count %}<span>📝 提交 {{ submit_count }}</span>{% endif %}
-  </div>
-  {% if tags %}
-  <div class="tags">
-    {% for tag in tags %}
-    <span class="tag">{{ tag }}</span>
-    {% endfor %}
-  </div>
-  {% endif %}
-  <div class="content">
-    {{ content | safe }}
-  </div>
-  <div class="footer">洛谷题库 · {{ url }}</div>
-</div>
-</body>
-</html>
-'''
-
-
-def _build_problem_html(detail: dict) -> str:
-    """用 Jinja2 模板构建题面 HTML（用于 html_render）"""
-    diff_name = detail.get('difficulty_name', '暂无评定')
-    diff_bg = DIFFICULTY_COLORS.get(diff_name, '#ebedf0')
-    # 白色文字用于深色背景
-    diff_color = '#fff'
-
-    content = detail.get('content_html', '')
-    if not content:
-        # 兜底：markdown 转简单 HTML
-        content = detail.get('content_md', '')
-
-    return PROBLEM_HTML_TMPL.format(
-        pid=detail.get('pid', 'P????'),
-        title=detail.get('title', '未知题目'),
-        diff_name=diff_name,
-        diff_bg=diff_bg,
-        diff_color=diff_color,
-        passed_rate=detail.get('passed_rate', ''),
-        submit_count=detail.get('submit_count', ''),
-        tags=detail.get('tags', [])[:10],
-        content=content,
-        url=detail.get('url', ''),
-    )
-
-
-async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent, cookies_file: str):
+async def _jump_session_flow(
+    context: Optional[Context],
+    event: AstrMessageEvent,
+    cookies_file: str,
+    *,
+    requested_count: int = 1,
+):
     """
     多轮题库跳转（5步状态机）。
 
@@ -975,49 +752,16 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
     _cookies = cookies_file
     qq_id = str(event.get_sender_id())
 
-    # --- 检测 cookie 是否有效 ---
-    logger.info(f'[Luogu jump] 检测 cookie 有效性: {cookies_file}')
-    cookie_valid = await asyncio.get_event_loop().run_in_executor(
-        None, _check_cookie_valid, cookies_file
+    cookie_ready = await ensure_jump_cookie_ready(
+        cookies_file=cookies_file,
+        qq_id=qq_id,
+        send_text=lambda text: event.send(event.plain_result(text)),
+        check_cookie_valid=_check_cookie_valid,
+        load_credentials=_load_credentials,
+        do_login=_do_login,
     )
-
-    # 如果 cookie 无效，检查是否有保存的账密并尝试自动重新登录
-    if not cookie_valid:
-        logger.warning('[Luogu jump] Cookie 已过期，检查是否有保存的账密...')
-        creds = _load_credentials(qq_id)
-        if creds:
-            username, password = creds
-            logger.info(f'[Luogu jump] 发现保存的账密，正在自动登录...')
-            yield event.plain_result("🔄 Cookie 已过期，正在使用保存的账密自动重新登录...")
-            loop = asyncio.get_event_loop()
-            login_result = await loop.run_in_executor(
-                None, lambda: _do_login(username, password, qq_id, save_credentials=False)
-            )
-            if login_result.get('success'):
-                logger.info(f'[Luogu jump] 自动登录成功，等待 cookie 写入...')
-                # 等待 cookie 文件写入完成
-                await asyncio.sleep(0.5)
-                # 重新检测 cookie
-                cookie_valid = await asyncio.get_event_loop().run_in_executor(
-                    None, _check_cookie_valid, cookies_file
-                )
-                logger.info(f'[Luogu jump] 重新检测 cookie 有效性: {cookie_valid}')
-                if not cookie_valid:
-                    yield event.plain_result('⚠️ 自动登录成功但 Cookie 仍无效，请重新绑定')
-                    return
-            else:
-                yield event.plain_result(
-                    f'⚠️ 自动登录失败：{login_result.get("message", "未知错误")}\n'
-                    '请重新绑定账号'
-                )
-                return
-        else:
-            logger.warning('[Luogu jump] Cookie 已过期，且无保存的账密')
-            yield event.plain_result(
-                '⚠️ 登录状态已失效，请重新绑定账号后继续。\n'
-                '使用方法：/luogu bind <手机号> <密码>'
-            )
-            return
+    if not cookie_ready:
+        return
 
     # --- 专用单线程 executor（所有 Playwright 操作必须在同一线程） ---
     _pw_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='pw_jump')
@@ -1028,14 +772,10 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
         return await loop.run_in_executor(_pw_executor, fn)
 
     # --- 状态初始化 ---
-    state = {
-        'difficulty': None,
-        'tags': [],
-        'keyword': None,
-        'total': 0,
-        'list_url': None,       # 题库列表页 URL（apply_filters 后保存）
-        'page_size': 50,        # 每页题数（apply_filters 时动态检测）
-    }
+    state = build_jump_initial_state(
+        requested_count,
+        clamp_count=clamp_luogu_request_count,
+    )
     step = ['difficulty']
 
     # --- 单一 ProblemFetcher 实例（贯穿整个会话） ---
@@ -1053,141 +793,25 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
 
     async def _show_current_step():
         s = step[0]
+        if s == 'result' and state.get('batch_summaries'):
+            await _send_text(format_jump_batch_preview(state['batch_summaries']))
+            return
         await _send_text(render_jump_step(s, state))
-
-    def _normalize_tag_input(tag_name: str) -> Tuple[str, bool]:
-        matched = fuzzy_match_tag(tag_name)
-        if matched:
-            return matched[0], True
-        return tag_name.strip(), False
-
-    def _normalize_tag_list(tags: Any) -> list[str]:
-        normalized: list[str] = []
-        seen = set()
-        for raw in tags or []:
-            tag_name = str(raw).strip()
-            if not tag_name:
-                continue
-            tag_full, _matched = _normalize_tag_input(tag_name)
-            if tag_full in seen:
-                continue
-            normalized.append(tag_full)
-            seen.add(tag_full)
-        return normalized
-
-    def _normalize_tag_list_with_meta(tags: Any) -> Tuple[list[str], list[str]]:
-        normalized: list[str] = []
-        unresolved: list[str] = []
-        seen_normalized = set()
-        seen_unresolved = set()
-        for raw in tags or []:
-            tag_name = str(raw).strip()
-            if not tag_name:
-                continue
-            tag_full, matched = _normalize_tag_input(tag_name)
-            if matched:
-                if tag_full in seen_normalized:
-                    continue
-                normalized.append(tag_full)
-                seen_normalized.add(tag_full)
-                continue
-            if tag_name in seen_unresolved:
-                continue
-            unresolved.append(tag_name)
-            seen_unresolved.add(tag_name)
-        return normalized, unresolved
-
-    def _resolve_selected_tag(tag_name: str) -> Optional[str]:
-        raw = tag_name.strip()
-        if not raw:
-            return None
-        if raw in state['tags']:
-            return raw
-
-        matched = fuzzy_match_tag(raw)
-        for candidate in matched:
-            if candidate in state['tags']:
-                return candidate
-
-        lowered = raw.lower()
-        for current in state['tags']:
-            current_lower = current.lower()
-            if lowered == current_lower or lowered in current_lower or current_lower in lowered:
-                return current
-        return None
-
-    def _looks_like_commandish_input(text: str) -> bool:
-        raw = text.strip()
-        if not raw:
-            return False
-        if raw.isdigit() or raw.startswith(('+', '-')):
-            return True
-
-        compact = re.sub(r'[\s_-]+', '', raw.lower())
-        explicit_tokens = {
-            'done', 'skip', 'random', 'rand', 'back', 'backdiff',
-            'backtags', 'backkeyword', 'quit', 'exit', 'help',
-            'render', 'img', 'image', 'screenshot',
-            '看图', '截图', '图片', '帮助', '退出', '随机',
-        }
-        if compact in explicit_tokens:
-            return True
-        if re.fullmatch(r'[a-z0-9]+', compact):
-            return True
-        return bool(
-            difflib.get_close_matches(
-                compact,
-                [token for token in explicit_tokens if re.fullmatch(r'[a-z0-9]+', token)],
-                n=1,
-                cutoff=0.75,
-            )
-        )
-
-    def _suggest_step_command(text: str, commands: Tuple[str, ...]) -> Optional[str]:
-        compact = re.sub(r'[\s_-]+', '', text.strip().lower())
-        if not compact:
-            return None
-        matches = difflib.get_close_matches(
-            compact,
-            [command.replace('-', '') for command in commands],
-            n=1,
-            cutoff=0.75,
-        )
-        if not matches:
-            return None
-        normalized = matches[0]
-        for command in commands:
-            if command.replace('-', '') == normalized:
-                return command
-        return None
 
     async def _parse_natural_language_intent(text: str) -> Optional[Dict[str, Any]]:
         if not context or not text.strip():
             return None
-        if _looks_like_commandish_input(text):
+        if looks_like_jump_commandish_input(text):
             return None
         intent = await parse_jump_natural_language(context, event, text, HOT_TAGS)
         if intent:
             logger.info(f'[Luogu jump] 自然语言意图: {intent}')
         return intent
 
-    async def _handle_natural_language_intent(
+    async def _handle_jump_intent_control_action(
         controller: SessionController,
-        intent: Optional[Dict[str, Any]],
+        action: str,
     ) -> bool:
-        if not intent:
-            return False
-
-        action = intent.get('action')
-        if intent.get('need_clarification'):
-            await _send_text(intent.get('clarification') or '我还差一点条件才能开始筛题。')
-            controller.keep(timeout=180, reset_timeout=True)
-            return True
-
-        reply = intent.get('reply')
-        if reply:
-            await _send_text(reply)
-
         if action == 'help':
             await _send_text(JUMP_HELP_TEXT)
             controller.keep(timeout=180, reset_timeout=True)
@@ -1199,10 +823,7 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
             return True
 
         if action == 'restart':
-            state['difficulty'] = None
-            state['tags'] = []
-            state['keyword'] = None
-            state['total'] = 0
+            move_jump_to_difficulty_step(state)
             step[0] = 'difficulty'
             await _send_text('← 已重置筛选条件，我们从头开始。')
             await _send_text(render_jump_step('difficulty', state))
@@ -1211,102 +832,111 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
 
         if action == 'back':
             if step[0] in ('result', 'waiting_md', 'keyword'):
-                state['keyword'] = None
-                state['total'] = 0
+                move_jump_to_keyword_step(state)
                 step[0] = 'keyword'
                 await _send_text('← 返回关键词筛选步骤（保留难度和标签）')
                 await _show_current_step()
             else:
+                move_jump_to_difficulty_step(state)
                 step[0] = 'difficulty'
                 await _send_text('← 返回难度筛选步骤')
                 await _send_text(render_jump_step('difficulty', state))
             controller.keep(timeout=180, reset_timeout=True)
             return True
 
-        if action in ('show_image', 'show_screenshot'):
-            if step[0] not in ('waiting_md', 'result') or not state.get('current_pid'):
-                await _send_text('先选出一道题，我再帮你渲染题面图片。')
-                controller.keep(timeout=180, reset_timeout=True)
-                return True
-            if action == 'show_screenshot':
-                await _send_text('📸 正在截取洛谷网页截图，请稍候...')
-                await _render_and_send_problem_image(mode='screenshot')
-            else:
-                await _send_text('🖼️ 正在渲染题面图片，请稍候...')
-                await _render_and_send_problem_image(mode='rendered')
-            step[0] = 'waiting_md'
+        return False
+
+    async def _handle_jump_intent_display_action(
+        controller: SessionController,
+        action: str,
+    ) -> bool:
+        if action not in ('show_image', 'show_screenshot'):
+            return False
+        if step[0] not in ('waiting_md', 'result') or not state.get('current_pid'):
+            await _send_text('先选出一道题，我再帮你渲染题面图片。')
             controller.keep(timeout=180, reset_timeout=True)
             return True
+        if action == 'show_screenshot':
+            await _send_text('📸 正在截取洛谷网页截图，请稍候...')
+            await _render_and_send_problem_image(mode='screenshot')
+        else:
+            await _send_text('🖼️ 正在渲染题面图片，请稍候...')
+            await _render_and_send_problem_image(mode='rendered')
+        step[0] = 'waiting_md'
+        controller.keep(timeout=180, reset_timeout=True)
+        return True
 
+    async def _handle_jump_intent_lookup_action(
+        controller: SessionController,
+        intent: Mapping[str, Any],
+        action: str,
+    ) -> bool:
         intent_has_filters = (
             intent.get('difficulty') is not None
             or bool(intent.get('tags'))
             or bool(intent.get('keyword'))
         )
 
-        if action in ('search', 'random', 'select'):
-            if action in ('random', 'select') and state.get('total') and not intent_has_filters:
-                if action == 'random':
-                    import random as _rand
-                    pos = _rand.randint(1, state['total'])
-                    await _send_text(f'🎲 随机选题（第 {pos} / {state["total"]}）')
-                    await _show_problem(pos)
-                else:
-                    index = intent.get('index')
-                    if index and 1 <= index <= state['total']:
-                        await _show_problem(index)
-                    else:
-                        await _send_text(f'⚠️ 序号超出范围，请输入 1-{state["total"]}')
-                controller.keep(timeout=180, reset_timeout=True)
-                return True
+        if action not in ('search', 'random', 'select'):
+            return False
 
-            if intent_has_filters:
-                state['difficulty'] = intent.get('difficulty') or None
-                normalized_tags, unresolved_tags = _normalize_tag_list_with_meta(intent.get('tags'))
-                state['tags'] = normalized_tags
-                state['keyword'] = intent.get('keyword') or None
-                if unresolved_tags:
-                    unresolved_text = ' '.join(unresolved_tags)
-                    if state['keyword']:
-                        if unresolved_text not in state['keyword']:
-                            state['keyword'] = f'{state["keyword"]} {unresolved_text}'.strip()
-                    else:
-                        state['keyword'] = unresolved_text
-                    await _send_text(
-                        'ℹ️ 洛谷里没有这些精确标签：'
-                        + '、'.join(unresolved_tags)
-                        + '。这次我先把它们当关键词一起筛。'
-                    )
-
-            await _send_text('🔍 正在按你的描述筛题，请稍候...')
-            ok = await _apply_filters()
-            if not ok:
-                controller.keep(timeout=180, reset_timeout=True)
-                return True
-
-            if state['total'] == 0:
-                step[0] = 'result'
-                await _send_text(render_no_result_prompt(state))
-                controller.keep(timeout=180, reset_timeout=True)
-                return True
-
-            step[0] = 'result'
+        if action in ('random', 'select') and state.get('total') and not intent_has_filters:
             if action == 'random':
-                import random as _rand
-                pos = _rand.randint(1, state['total'])
-                await _send_text(f'🎲 随机选题（第 {pos} / {state["total"]}）')
-                await _show_problem(pos)
-            elif action == 'select':
-                index = intent.get('index')
-                if index and 1 <= index <= state['total']:
-                    await _show_problem(index)
-                else:
-                    await _send_text(f'⚠️ 序号超出范围，请输入 1-{state["total"]}')
-                    await _show_current_step()
+                await _show_random_problem()
             else:
-                await _show_current_step()
-
+                await _show_selected_problem(int(intent.get('index') or 0))
             controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if intent_has_filters:
+            unresolved_notice = apply_jump_search_intent_filters(
+                state,
+                difficulty=intent.get('difficulty'),
+                tags=list(intent.get('tags') or []),
+                keyword=intent.get('keyword'),
+                normalize_tags=normalize_jump_tag_list_with_meta,
+            )
+            if unresolved_notice:
+                await _send_text(unresolved_notice)
+
+        ok = await _apply_filters_and_present_results(
+            loading_text='🔍 正在按你的描述筛题，请稍候...',
+            action=action,
+            select_index=int(intent.get('index') or 0),
+        )
+        if not ok:
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        controller.keep(timeout=180, reset_timeout=True)
+        return True
+
+    async def _handle_natural_language_intent(
+        controller: SessionController,
+        intent: Optional[Dict[str, Any]],
+    ) -> bool:
+        if not intent:
+            return False
+
+        action = intent.get('action')
+        if intent.get('count') is not None:
+            state['requested_count'] = clamp_luogu_request_count(intent.get('count'))
+        if intent.get('need_clarification'):
+            await _send_text(intent.get('clarification') or '我还差一点条件才能开始筛题。')
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        reply = intent.get('reply')
+        if reply:
+            await _send_text(reply)
+
+        if await _handle_jump_intent_control_action(controller, action):
+            return True
+
+        if await _handle_jump_intent_display_action(controller, action):
+            return True
+
+        if await _handle_jump_intent_lookup_action(controller, intent, action):
             return True
 
         return False
@@ -1314,23 +944,12 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
     async def _apply_filters() -> bool:
         nonlocal fetcher
         try:
-            # 使用单一实例（所有 Playwright 操作必须在同一线程）
-            if fetcher is None:
-                fetcher = ProblemFetcher(_cookies)
-                await _run_in_pw(fetcher.setup)
-            else:
-                logger.info('[Luogu jump] 复用已有 ProblemFetcher 实例')
-
-            def _do_apply():
-                user_diff = state.get('difficulty')
-                url_difficulty = (user_diff - 1) if user_diff is not None else None
-                return fetcher.apply_filters(
-                    difficulty=url_difficulty,
-                    tags=state['tags'] if state['tags'] else None,
-                    keyword=state['keyword'] if state['keyword'] else None,
-                )
-
-            r = await _run_in_pw(_do_apply)
+            fetcher, r = await apply_jump_filters_via_fetcher(
+                fetcher=fetcher,
+                state=state,
+                cookies_file=_cookies,
+                run_in_pw=_run_in_pw,
+            )
             if not r.get('success'):
                 await _send_text(f'❌ 筛选失败：{r.get("message", "未知错误")}')
                 return False
@@ -1343,15 +962,337 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
                     '⚠️ 以下标签未找到，已自动忽略：'
                     + '、'.join(missing_tags)
                 )
-            state['total'] = r.get('total', 0)
-            state['list_url'] = r.get('list_url')
-            state['page_size'] = r.get('page_size_detected', 50)
+            remember_jump_filter_result(state, r)
             logger.info(f'[Luogu jump] 筛选完成: total={state["total"]}, page_size={state["page_size"]}, list_url={state["list_url"]}')
             return True
         except Exception as e:
             logger.error(f'[Luogu jump] 筛选异常: {traceback.format_exc()}')
             await _send_text(f'❌ 筛选出错：{e}')
             return False
+
+    async def _refresh_batch_summaries(batch_count: int) -> list[Dict[str, Any]]:
+        nonlocal fetcher
+        try:
+            fetcher, summaries = await refresh_jump_batch_summaries(
+                state=state,
+                fetcher=fetcher,
+                cookies_file=_cookies,
+                run_in_pw=_run_in_pw,
+                batch_count=batch_count,
+            )
+            state['batch_summaries'] = summaries
+            return state['batch_summaries']
+        except Exception as e:
+            logger.error(f'[Luogu jump] 批量候选提取异常: {traceback.format_exc()}')
+            await _send_text(f'❌ 批量读取候选题目出错：{e}')
+            state['batch_summaries'] = []
+            return []
+
+    async def _show_problem_batch(positions: list[int]):
+        nonlocal fetcher
+        try:
+            if not positions:
+                await _send_text('❌ 没有可展示的题目。')
+                return
+            fetcher, items = await load_jump_problem_batch(
+                state=state,
+                fetcher=fetcher,
+                cookies_file=_cookies,
+                run_in_pw=_run_in_pw,
+                positions=positions,
+            )
+            state['batch_summaries'] = items
+            clear_jump_selection_state(state)
+            state['batch_summaries'] = items
+            step[0] = 'result'
+            await _show_current_step()
+        except Exception as e:
+            logger.error(f'[Luogu jump] 批量选题异常: {traceback.format_exc()}')
+            await _send_text(f'❌ 批量选题出错：{e}')
+
+    async def _show_random_problem():
+        positions = choose_jump_random_positions(
+            state.get('total') or 0,
+            int(state.get('requested_count') or 1),
+        )
+        if not positions:
+            await _send_text('❌ 当前没有可选题目。')
+            return
+        if len(positions) > 1:
+            await _send_text(f'🎲 随机挑出 {len(positions)} 道题。')
+            await _show_problem_batch(positions)
+            return
+        pos = positions[0]
+        await _send_text(f'🎲 随机选题（第 {pos} / {state["total"]}）')
+        await _show_problem(pos)
+
+    async def _apply_filters_and_present_results(
+        *,
+        loading_text: str,
+        action: str = 'search',
+        select_index: Optional[int] = None,
+    ) -> bool:
+        await _send_text(loading_text)
+        ok = await _apply_filters()
+        if not ok:
+            return False
+
+        step[0] = 'result'
+        if state['total'] == 0:
+            await _send_text(render_no_result_prompt(state))
+            return True
+
+        if action == 'random':
+            await _show_random_problem()
+            return True
+
+        if action == 'select':
+            await _show_selected_problem(
+                int(select_index or 0),
+                show_current_step_on_error=True,
+            )
+            return True
+
+        requested_count = int(state.get('requested_count') or 1)
+        if requested_count > 1:
+            await _refresh_batch_summaries(requested_count)
+        await _show_current_step()
+        return True
+
+    async def _show_selected_problem(index: int, *, show_current_step_on_error: bool = False) -> None:
+        target_pid, target_position, selection_error = resolve_jump_selection_target(
+            state.get('batch_summaries') or [],
+            int(index or 0),
+            int(state.get('total') or 0),
+        )
+        if target_pid:
+            await _show_problem(pid=target_pid)
+            return
+        if target_position:
+            await _show_problem(target_position)
+            return
+        await _send_text(selection_error or '⚠️ 暂时无法打开这道题。')
+        if show_current_step_on_error:
+            await _show_current_step()
+
+    async def _handle_result_step_input(
+        controller: SessionController,
+        text: str,
+        lower: str,
+    ) -> bool:
+        if state['total'] == 0:
+            if is_jump_back_to_difficulty_command(lower):
+                move_jump_to_difficulty_step(state)
+                step[0] = 'difficulty'
+                await _send_text('← 重置所有条件，返回难度筛选步骤')
+                await _send_text(render_jump_step('difficulty', state))
+                controller.keep(timeout=180, reset_timeout=True)
+                return True
+            await _send_text('输入 back-diff 重新开始，quit 退出')
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if is_jump_random_command(lower):
+            await _show_random_problem()
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if is_jump_back_to_difficulty_command(lower):
+            move_jump_to_difficulty_step(state)
+            step[0] = 'difficulty'
+            await _send_text('← 重置所有条件，返回难度筛选步骤')
+            await _send_text(render_jump_step('difficulty', state))
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if is_jump_back_to_keyword_command(lower):
+            move_jump_to_keyword_step(state)
+            step[0] = 'keyword'
+            await _send_text('← 返回关键词筛选步骤（保留难度和标签）')
+            await _show_current_step()
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if text.isdigit():
+            await _show_selected_problem(int(text))
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if await _handle_natural_language_intent(
+            controller, await _parse_natural_language_intent(text)
+        ):
+            return True
+
+        await _show_current_step()
+        controller.keep(timeout=180, reset_timeout=True)
+        return True
+
+    async def _handle_difficulty_step_input(
+        controller: SessionController,
+        text: str,
+        lower: str,
+    ) -> bool:
+        if is_jump_help_command(lower):
+            await _send_text(render_jump_step('difficulty', state))
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        difficulty_message = apply_jump_difficulty_input(state, text)
+        if difficulty_message:
+            await _send_text(difficulty_message)
+            step[0] = 'tags'
+            await _show_current_step()
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if await _handle_natural_language_intent(
+            controller, await _parse_natural_language_intent(text)
+        ):
+            return True
+
+        await _send_text('❓ 请输入数字 0-8，或直接说出你的需求，例如「来一道提高+/省选− 的 DP 题」。')
+        controller.keep(timeout=180, reset_timeout=True)
+        return True
+
+    async def _handle_tags_step_input(
+        controller: SessionController,
+        text: str,
+        lower: str,
+    ) -> bool:
+        if is_jump_done_command(lower) or is_jump_skip_command(lower):
+            step[0] = 'keyword'
+            await _show_current_step()
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        tag_messages = apply_jump_tag_update(state, text)
+        if tag_messages is not None:
+            for message in tag_messages:
+                await _send_text(message)
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if is_jump_status_command(lower):
+            await _send_text(render_jump_step('tags', state))
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if await _handle_natural_language_intent(
+            controller, await _parse_natural_language_intent(text)
+        ):
+            return True
+
+        typo_command = suggest_jump_step_command(text, ('done', 'skip'))
+        if typo_command:
+            await _send_text(
+                f'❓ 你是不是想输入 `{typo_command}`？\n'
+                f'{render_selected_tags_update(state)}'
+            )
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        await _send_text(
+            f'❓ 无法理解输入\n'
+            f'{render_selected_tags_update(state)}\n\n'
+            f'输入 +标签 添加，-标签 移除，done 确认，\n'
+            f'也可以直接说「来一道图论最短路题」。'
+        )
+        controller.keep(timeout=180, reset_timeout=True)
+        return True
+
+    async def _handle_keyword_step_input(
+        controller: SessionController,
+        text: str,
+        lower: str,
+    ) -> bool:
+        await _send_text(apply_jump_keyword_input(state, text, lower))
+
+        ok = await _apply_filters_and_present_results(
+            loading_text='🔍 正在应用筛选条件，请稍候...',
+        )
+        if not ok:
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+        controller.keep(timeout=180, reset_timeout=True)
+        return True
+
+    async def _handle_waiting_md_step_input(
+        controller: SessionController,
+        text: str,
+        lower: str,
+    ) -> bool:
+        if is_jump_show_image_command(lower):
+            await _send_text('🖼️ 正在渲染题面图片，请稍候...')
+            await _render_and_send_problem_image(mode='rendered')
+            step[0] = 'waiting_md'
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if is_jump_show_screenshot_command(lower):
+            await _send_text('📸 正在截取洛谷网页截图，请稍候...')
+            await _render_and_send_problem_image(mode='screenshot')
+            step[0] = 'waiting_md'
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if is_jump_random_command(lower):
+            await _show_random_problem()
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if is_jump_back_to_keyword_command(lower):
+            move_jump_to_keyword_step(state)
+            step[0] = 'keyword'
+            await _send_text('← 返回关键词筛选步骤（保留难度和标签）')
+            await _show_current_step()
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if is_jump_back_to_difficulty_command(lower):
+            move_jump_to_difficulty_step(state)
+            step[0] = 'difficulty'
+            await _send_text('← 重置所有条件，返回难度筛选步骤')
+            await _send_text(render_jump_step('difficulty', state))
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        if is_jump_quit_command(lower):
+            await _send_text('✅ 已退出题库跳转，下次见！')
+            controller.stop()
+            return True
+
+        if await _handle_natural_language_intent(
+            controller, await _parse_natural_language_intent(text)
+        ):
+            return True
+
+        step[0] = 'result'
+        controller.keep(timeout=180, reset_timeout=True)
+        return True
+
+    async def _handle_jump_global_input(
+        controller: SessionController,
+        text: str,
+        lower: str,
+    ) -> bool:
+        if is_jump_quit_command(lower):
+            await _send_text('✅ 已退出题库跳转，下次见！')
+            controller.stop()
+            return True
+
+        if is_jump_help_command(lower):
+            await _send_text(JUMP_HELP_TEXT)
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        direct_pid = _extract_direct_problem_id(text)
+        if direct_pid:
+            await _send_text(f'🔎 直接定位题号：{direct_pid}')
+            await _show_problem(pid=direct_pid)
+            controller.keep(timeout=180, reset_timeout=True)
+            return True
+
+        return False
 
     def _extract_direct_problem_id(text: str) -> Optional[str]:
         if not text or text.startswith('+') or text.startswith('-'):
@@ -1370,106 +1311,42 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
         """
         nonlocal fetcher
         try:
-            # 使用同一实例（所有 Playwright 操作必须在同一线程）
-            if fetcher is None:
-                fetcher = ProblemFetcher(_cookies)
-                await _run_in_pw(fetcher.setup)
-                # 恢复题库列表页
-                if state.get('list_url'):
-                    def _goto_list():
-                        fetcher.page.goto(state['list_url'], timeout=20000)
-                        fetcher.page.wait_for_load_state('domcontentloaded', timeout=15000)
-                        import time as _time; _time.sleep(1.5)
-                    await _run_in_pw(_goto_list)
-
-            def _do_show():
-                direct_pid = pid
-                if direct_pid:
-                    detail = fetcher.get_problem_detail(direct_pid)
-                    md_content = fetcher.extract_markdown_content(direct_pid)
-                    normalized_pid = str(detail.get('pid') or direct_pid).strip().upper()
-                    if not normalized_pid.startswith('P'):
-                        normalized_pid = f'P{normalized_pid}'
-                    return normalized_pid, detail, md_content, None
-
-                if position:
-                    # 传入 list_url 用于 page 失效时恢复
-                    resolved_pid = fetcher.navigate_to_problem(
-                        position,
-                        list_url=state.get('list_url'),
-                        page_size_hint=state.get('page_size'),
-                    )
-                    if not resolved_pid:
-                        return None, None, None, f'❌ 跳转题目失败（page_size={state.get("page_size")}, list_url={state.get("list_url")}）'
-                import re as _re
-                url = fetcher.page.url
-                pid_m = _re.search(r'/problem/(P?\w+)', url, _re.IGNORECASE)
-                resolved_pid = pid_m.group(1) if pid_m else '???'
-                if not resolved_pid.upper().startswith('P'):
-                    resolved_pid = 'P' + resolved_pid.upper().lstrip('P')
-                detail = fetcher.get_problem_detail(resolved_pid)
-                # 通过 API 获取原始 Markdown 内容
-                md_content = fetcher.extract_markdown_content(resolved_pid)
-                return resolved_pid, detail, md_content, None
-
-            result = await _run_in_pw(_do_show)
-            pid = result[0]
-            detail = result[1]
-            md_content = result[2]
+            fetcher, pid, detail, md_content, error = await load_jump_problem_detail(
+                fetcher=fetcher,
+                state=state,
+                cookies_file=_cookies,
+                run_in_pw=_run_in_pw,
+                position=position,
+                pid=pid,
+            )
 
             if pid is None:
-                await _send_text(result[3])  # 错误消息
+                await _send_text(error or '❌ 跳转题目失败')
                 return
 
-            # 保存当前 PID 到 state，供「看图」指令使用
-            state['current_pid'] = pid
-            state['current_md'] = md_content
-            state['current_title'] = detail.get('title', '')
+            remember_jump_problem_artifact(
+                state,
+                pid=pid,
+                title=(detail or {}).get('title'),
+                md_content=md_content,
+            )
 
             # ── 题目摘要（头部信息） ──
-            header = render_problem_header(pid, detail)
+            header = render_problem_header(pid, detail or {})
 
             # ── 构建合并转发节点 ──
-            # 将 Markdown 内容按 1500 字分段，每段一个 Node
-            # 使用 event.message_obj.self_id 获取 bot 自己的 ID，使合并转发显示为 bot 发送
             sender_id = event.message_obj.self_id if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'self_id') else '10000'
             sender_name = '洛谷助手'
-
-            nodes = []
-
-            # Node 1: 摘要
-            nodes.append(Comp.Node(
-                uin=sender_id,
-                name=sender_name,
-                content=[Comp.Plain(header)],
-            ))
-
-            # Node 2+: Markdown 内容分段
-            if md_content and len(md_content) > 20:
-                chunks = split_markdown_chunks(md_content)
-                for idx, chunk in enumerate(chunks):
-                    label = f'📄 题目内容' if idx == 0 else f'📄 题目内容（续{idx}）'
-                    if len(chunks) > 1:
-                        label += f' [{idx+1}/{len(chunks)}]'
-                    nodes.append(Comp.Node(
-                        uin=sender_id,
-                        name=sender_name,
-                        content=[Comp.Plain(f'{label}\n\n{chunk}')],
-                    ))
-            else:
-                nodes.append(Comp.Node(
-                    uin=sender_id,
-                    name=sender_name,
-                    content=[Comp.Plain('📄 题目内容为空或获取失败')],
-                ))
-
-            # Node 尾部：操作提示
             footer = render_problem_footer()
-            nodes.append(Comp.Node(
-                uin=sender_id,
-                name=sender_name,
-                content=[Comp.Plain(footer)],
-            ))
+            nodes = build_jump_problem_forward_nodes(
+                Comp.Node,
+                Comp.Plain,
+                sender_id=str(sender_id),
+                sender_name=sender_name,
+                header=header,
+                md_content=md_content or '',
+                footer=footer,
+            )
 
             # 尝试合并转发，失败则降级为普通消息
             try:
@@ -1478,13 +1355,8 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
                 await event.send(mr)
             except Exception as forward_err:
                 logger.warning(f'[Luogu jump] 合并转发失败，降级为普通消息: {forward_err}')
-                # 降级：仅发摘要 + 前 800 字
-                await _send_text(header)
-                short_md = md_content[:800] if md_content else '（内容为空）'
-                if len(md_content or '') > 800:
-                    short_md += '\n\n...（内容过长，输入「看图」查看截图）'
-                await _send_text(f'📄 题目内容：\n\n{short_md}')
-                await _send_text(footer)
+                for message in build_jump_problem_fallback_messages(header, md_content or '', footer):
+                    await _send_text(message)
 
             # 切换到 waiting_md 状态，等待用户输入「看图」指令
             step[0] = 'waiting_md'
@@ -1507,14 +1379,16 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
             if mode == 'rendered':
                 await _send_text('ℹ️ 当前已临时关闭 Markdown 长图渲染，改为发送更稳定的网页截图。')
 
-            def _do_screenshot():
-                # 重新访问题目页面并截图
-                fetcher.page.goto(f'https://www.luogu.com.cn/problem/{pid}', timeout=20000)
-                fetcher.page.wait_for_load_state('domcontentloaded', timeout=15000)
-                import time as _time; _time.sleep(1.5)
-                return fetcher.screenshot_problem(pid)
-
-            img_bytes = await _run_in_pw(_do_screenshot)
+            fetcher = await ensure_jump_fetcher(
+                fetcher=fetcher,
+                cookies_file=_cookies,
+                run_in_pw=_run_in_pw,
+            )
+            img_bytes = await screenshot_jump_problem(
+                fetcher=fetcher,
+                pid=str(pid),
+                run_in_pw=_run_in_pw,
+            )
 
             img_path = _ensure_image_path(img_bytes) if img_bytes else None
 
@@ -1536,304 +1410,19 @@ async def _jump_session_flow(context: Optional[Context], event: AstrMessageEvent
         nonlocal state
         text = ev.message_str.strip()
         lower = text.lower()
-        s = step[0]
-
-        # ── 全局命令 ──────────────────────────────────────────────
-        if lower in ('quit', '退出', 'exit', 'q', '算了'):
-            await _send_text('✅ 已退出题库跳转，下次见！')
-            controller.stop()
+        if await _handle_jump_global_input(controller, text, lower):
             return
 
-        if lower in ('help', '帮助', '?'):
-            await _send_text(JUMP_HELP_TEXT)
-            controller.keep(timeout=180, reset_timeout=True)
-            return
-
-        direct_pid = _extract_direct_problem_id(text)
-        if direct_pid:
-            await _send_text(f'🔎 直接定位题号：{direct_pid}')
-            await _show_problem(pid=direct_pid)
-            controller.keep(timeout=180, reset_timeout=True)
-            return
-
-        # ══════════════════════════════════════════════════════════
-        # Step 1：难度选择
-        # ══════════════════════════════════════════════════════════
-        if s == 'difficulty':
-            if lower in ('help', '?'):
-                await _send_text(render_jump_step('difficulty', state))
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            if text.isdigit():
-                d = int(text)
-                if 0 <= d <= 8:
-                    state['difficulty'] = d if d > 0 else None
-                    # 用户选项 1→DIFFICULTY_NAMES[0]=暂无评定，2→DIFFICULTY_NAMES[1]=入门...
-                    diff_name = DIFFICULTY_NAMES[d - 1] if d > 0 else '不限'
-                    await _send_text(f'✅ 已选择难度：{diff_name}')
-                    step[0] = 'tags'
-                    await _show_current_step()
-                    controller.keep(timeout=180, reset_timeout=True)
-                    return
-
-            if await _handle_natural_language_intent(
-                controller, await _parse_natural_language_intent(text)
-            ):
-                return
-
-            await _send_text('❓ 请输入数字 0-8，或直接说出你的需求，例如「来一道提高+/省选− 的 DP 题」。')
-            controller.keep(timeout=180, reset_timeout=True)
-            return
-
-        # ══════════════════════════════════════════════════════════
-        # Step 2：标签筛选（多轮）
-        # ══════════════════════════════════════════════════════════
-        if s == 'tags':
-            if lower == 'done':
-                step[0] = 'keyword'
-                await _show_current_step()
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            if lower in ('skip', '跳过'):
-                step[0] = 'keyword'
-                await _show_current_step()
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            # +标签
-            if text.startswith('+'):
-                tag_name = text[1:].strip()
-                if not tag_name:
-                    await _send_text('❓ 请输入标签名，如 +动规')
-                    controller.keep(timeout=180, reset_timeout=True)
-                    return
-
-                tag_full, matched = _normalize_tag_input(tag_name)
-                if matched:
-                    if tag_full in state['tags']:
-                        await _send_text(f'「{tag_full}」已在已选列表中')
-                    else:
-                        state['tags'].append(tag_full)
-                        await _send_text(f'✅ 已添加：「{tag_full}」')
-                else:
-                    if tag_name in state['tags']:
-                        await _send_text(f'「{tag_name}」已在已选列表中')
-                    else:
-                        state['tags'].append(tag_name)
-                        await _send_text(
-                            f'📝 已暂存：「{tag_name}」\n'
-                            f'本地词表暂未命中，筛题时会到洛谷站内标签面板继续尝试；'
-                            f'若站内也不存在，我会提醒并忽略它。'
-                        )
-
-                await _send_text(render_selected_tags_update(state))
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            # -标签
-            if text.startswith('-'):
-                tag_name = text[1:].strip()
-                resolved_tag = _resolve_selected_tag(tag_name)
-                if resolved_tag:
-                    state['tags'].remove(resolved_tag)
-                    await _send_text(f'✅ 已移除：「{resolved_tag}」')
-                else:
-                    await _send_text(f'「{tag_name}」不在已选列表中')
-                await _send_text(render_selected_tags_update(state))
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            if lower in ('list', '状态', '当前'):
-                await _send_text(render_jump_step('tags', state))
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            if await _handle_natural_language_intent(
-                controller, await _parse_natural_language_intent(text)
-            ):
-                return
-
-            typo_command = _suggest_step_command(text, ('done', 'skip'))
-            if typo_command:
-                await _send_text(
-                    f'❓ 你是不是想输入 `{typo_command}`？\n'
-                    f'{render_selected_tags_update(state)}'
-                )
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            await _send_text(
-                f'❓ 无法理解输入\n'
-                f'{render_selected_tags_update(state)}\n\n'
-                f'输入 +标签 添加，-标签 移除，done 确认，\n'
-                f'也可以直接说「来一道图论最短路题」。'
-            )
-            controller.keep(timeout=180, reset_timeout=True)
-            return
-
-        # ══════════════════════════════════════════════════════════
-        # Step 3：关键词（可选）
-        # ══════════════════════════════════════════════════════════
-        if s == 'keyword':
-            if lower in ('skip', '跳过', '无'):
-                state['keyword'] = None
-                await _send_text('✅ 跳过关键词筛选')
-            elif text:
-                state['keyword'] = text
-                await _send_text(f'✅ 已设置关键词：「{text}」')
-            else:
-                state['keyword'] = None
-                await _send_text('✅ 未输入关键词，跳过')
-
-            await _send_text('🔍 正在应用筛选条件，请稍候...')
-            ok = await _apply_filters()
-            if not ok:
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            if state['total'] == 0:
-                await _send_text(render_no_result_prompt(state))
-                step[0] = 'result'
-            else:
-                step[0] = 'result'
-                await _show_current_step()
-            controller.keep(timeout=180, reset_timeout=True)
-            return
-
-        # ══════════════════════════════════════════════════════════
-        # Step 4：选题
-        # ══════════════════════════════════════════════════════════
-        if s == 'result':
-            if state['total'] == 0:
-                if lower == 'back-diff':
-                    state['difficulty'] = None
-                    state['tags'] = []
-                    state['keyword'] = None
-                    state['total'] = 0
-                    step[0] = 'difficulty'
-                    await _send_text('← 重置所有条件，返回难度筛选步骤')
-                    await _send_text(render_jump_step('difficulty', state))
-                    controller.keep(timeout=180, reset_timeout=True)
-                    return
-                await _send_text('输入 back-diff 重新开始，quit 退出')
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            if lower in ('random', 'r', '随机', 'rand'):
-                import random as _rand
-                pos = _rand.randint(1, state['total'])
-                await _send_text(f'🎲 随机选题（第 {pos} / {state["total"]}）')
-                await _show_problem(pos)
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            if lower == 'back-diff':
-                state['difficulty'] = None
-                state['tags'] = []
-                state['keyword'] = None
-                state['total'] = 0
-                step[0] = 'difficulty'
-                await _send_text('← 重置所有条件，返回难度筛选步骤')
-                await _send_text(render_jump_step('difficulty', state))
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            if lower in ('back-tags', 'back-keyword', 'back'):
-                state['keyword'] = None
-                state['total'] = 0
-                step[0] = 'keyword'
-                await _send_text('← 返回关键词筛选步骤（保留难度和标签）')
-                await _show_current_step()
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            if text.isdigit():
-                pos = int(text)
-                if 1 <= pos <= state['total']:
-                    await _show_problem(pos)
-                    controller.keep(timeout=180, reset_timeout=True)
-                    return
-                else:
-                    await _send_text(f'⚠️ 序号超出范围，请输入 1-{state["total"]}')
-                    controller.keep(timeout=180, reset_timeout=True)
-                    return
-
-            if await _handle_natural_language_intent(
-                controller, await _parse_natural_language_intent(text)
-            ):
-                return
-
-            await _show_current_step()
-            controller.keep(timeout=180, reset_timeout=True)
-            return
-
-        # ══════════════════════════════════════════════════════════
-        # waiting_md 状态：等待用户输入「看图」/「截图」指令
-        # ══════════════════════════════════════════════════════════
-        if s == 'waiting_md':
-            # 「看图」指令 - 渲染 Markdown 长图
-            if lower in ('看图', 'render', 'img', 'image', '图片'):
-                await _send_text('🖼️ 正在渲染题面图片，请稍候...')
-                await _render_and_send_problem_image(mode='rendered')
-                step[0] = 'waiting_md'
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            # 「截图」指令 - 获取官网页面截图
-            if lower in ('截图', 'screenshot'):
-                await _send_text('📸 正在截取洛谷网页截图，请稍候...')
-                await _render_and_send_problem_image(mode='screenshot')
-                step[0] = 'waiting_md'
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            # 继续随机下一题
-            if lower in ('random', 'r', '随机', 'rand'):
-                import random as _rand
-                pos = _rand.randint(1, state['total'])
-                await _send_text(f'🎲 随机选题（第 {pos} / {state["total"]}）')
-                await _show_problem(pos)
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            # 返回选题
-            if lower in ('back', 'back-tags', 'back-keyword'):
-                state['keyword'] = None
-                state['total'] = 0
-                state['showed_md'] = False
-                step[0] = 'keyword'
-                await _send_text('← 返回关键词筛选步骤（保留难度和标签）')
-                await _show_current_step()
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            if lower == 'back-diff':
-                state['difficulty'] = None
-                state['tags'] = []
-                state['keyword'] = None
-                state['total'] = 0
-                state['showed_md'] = False
-                step[0] = 'difficulty'
-                await _send_text('← 重置所有条件，返回难度筛选步骤')
-                await _send_text(render_jump_step('difficulty', state))
-                controller.keep(timeout=180, reset_timeout=True)
-                return
-
-            if lower in ('quit', '退出', 'exit', 'q', '算了'):
-                await _send_text('✅ 已退出题库跳转，下次见！')
-                controller.stop()
-                return
-
-            if await _handle_natural_language_intent(
-                controller, await _parse_natural_language_intent(text)
-            ):
-                return
-
-            # 其他输入 - 切换回 result 状态继续处理
-            step[0] = 'result'
-            controller.keep(timeout=180, reset_timeout=True)
+        step_handlers = {
+            'difficulty': _handle_difficulty_step_input,
+            'tags': _handle_tags_step_input,
+            'keyword': _handle_keyword_step_input,
+            'result': _handle_result_step_input,
+            'waiting_md': _handle_waiting_md_step_input,
+        }
+        handler = step_handlers.get(step[0])
+        if handler:
+            await handler(controller, text, lower)
             return
 
     try:
@@ -1940,304 +1529,6 @@ if _ASTRBOT:
         def _append_luogu_session_event(self, session_data: Dict[str, Any], event_type: str, **payload: Any) -> None:
             append_session_event(session_data, event_type, **payload)
 
-        def _replay_luogu_session_state(self, session_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-            current = session_data or {}
-            return replay_luogu_session_state(current.get("events") or [], fallback=current)
-
-        def _parse_simple_chinese_number(self, text: str) -> Optional[int]:
-            digits = {
-                "零": 0,
-                "一": 1,
-                "二": 2,
-                "两": 2,
-                "三": 3,
-                "四": 4,
-                "五": 5,
-                "六": 6,
-                "七": 7,
-                "八": 8,
-                "九": 9,
-            }
-            units = {"十": 10, "百": 100, "千": 1000}
-            value = str(text or "").strip()
-            if not value:
-                return None
-
-            total = 0
-            current = 0
-            for ch in value:
-                if ch in digits:
-                    current = digits[ch]
-                    continue
-                unit = units.get(ch)
-                if unit is None:
-                    return None
-                if current == 0:
-                    current = 1
-                total += current * unit
-                current = 0
-            total += current
-            return total if total > 0 else None
-
-        def _parse_luogu_follow_up_index(self, query: str) -> Optional[int]:
-            text = str(query or "").strip()
-            if not text:
-                return None
-            digit_match = re.search(r"第\s*(\d+)\s*[题道个]?", text)
-            if digit_match:
-                return int(digit_match.group(1))
-            chinese_match = re.search(r"第\s*([零一二两三四五六七八九十百千]+)\s*[题道个]?", text)
-            if chinese_match:
-                return self._parse_simple_chinese_number(chinese_match.group(1))
-            return None
-
-        def _looks_like_luogu_follow_up(self, message: str, session_data: Optional[Dict[str, Any]]) -> bool:
-            if not session_data:
-                return False
-            text = (message or "").strip().lower()
-            if not text or text.startswith("/luogu"):
-                return False
-            follow_markers = (
-                "多少道", "总共有", "一共有", "总数", "随机", "random", "随便来一道", "随便来一题",
-                "再来一道", "再来一题", "第", "这道题", "题面", "转发", "合并消息",
-                "完整题面", "看图", "截图", "题图", "图片", "关键词", "标签", "来源", "难度",
-                "候选", "列表", "重发", "再发", "没看到", "不是说了", "怎么又把",
-            )
-            return any(marker in text for marker in follow_markers)
-
-        def _message_requests_random_problem(self, message: str) -> bool:
-            text = str(message or "").strip().lower()
-            if not text:
-                return False
-            random_markers = (
-                "随便来一道", "随便来一题", "随机来一道", "随机来一题",
-                "随机挑一道", "随机挑一题", "随便挑一道", "随便挑一题",
-            )
-            return (
-                text == "random"
-                or any(marker in text for marker in random_markers)
-                or ("随机" in text and any(marker in text for marker in ("一道", "一题", "挑", "来")))
-            )
-
-        def _message_has_quoted_image_context(self, event: AstrMessageEvent) -> bool:
-            root = getattr(event, "message_obj", None)
-            if root is None:
-                return False
-
-            queue: list[tuple[Any, int]] = [(root, 0)]
-            seen: set[int] = set()
-            found_quote = False
-            found_image = False
-            attr_names = ("message", "chain", "components", "quote", "reply", "origin", "source", "content")
-
-            while queue:
-                current, depth = queue.pop(0)
-                if current is None:
-                    continue
-                current_id = id(current)
-                if current_id in seen:
-                    continue
-                seen.add(current_id)
-
-                type_name = current.__class__.__name__.lower()
-                text = ""
-                try:
-                    text = repr(current)
-                except Exception:
-                    text = ""
-                lower = text.lower()
-                if any(marker in lower for marker in ("quote", "reply")) or "引用" in text:
-                    found_quote = True
-                if (
-                    "image_url" in lower
-                    or "图片" in text
-                    or type_name == "image"
-                    or type_name.endswith("image")
-                ):
-                    found_image = True
-                if found_quote and found_image:
-                    return True
-
-                if depth >= 2:
-                    continue
-                if isinstance(current, dict):
-                    for value in current.values():
-                        queue.append((value, depth + 1))
-                    continue
-                if isinstance(current, (list, tuple, set)):
-                    for value in current:
-                        queue.append((value, depth + 1))
-                    continue
-                for attr in attr_names:
-                    if hasattr(current, attr):
-                        try:
-                            value = getattr(current, attr)
-                        except Exception:
-                            continue
-                        queue.append((value, depth + 1))
-            return False
-
-        def _is_quoted_image_content_part(self, part: Any) -> bool:
-            if part is None:
-                return False
-            if isinstance(part, dict):
-                part_type = str(part.get("type") or part.get("kind") or "").strip().lower()
-                if part_type in {"image", "image_url", "input_image"}:
-                    return True
-                return "image_url" in part or "image" in part
-
-            type_name = part.__class__.__name__.lower()
-            if type_name == "image" or type_name.endswith("image") or type_name.endswith("imagepart"):
-                return True
-            if hasattr(part, "image_url"):
-                return True
-            try:
-                return "image_url" in repr(part).lower()
-            except Exception:
-                return False
-
-        def _replace_request_context_content(self, context_item: Any, content: Any) -> Any:
-            if isinstance(context_item, dict):
-                updated = dict(context_item)
-                updated["content"] = content
-                return updated
-            model_copy = getattr(context_item, "model_copy", None)
-            if callable(model_copy):
-                try:
-                    return model_copy(update={"content": content})
-                except Exception:
-                    pass
-            copy_method = getattr(context_item, "copy", None)
-            if callable(copy_method):
-                try:
-                    return copy_method(update={"content": content})
-                except Exception:
-                    pass
-            try:
-                setattr(context_item, "content", content)
-            except Exception:
-                pass
-            return context_item
-
-        def _sanitize_quoted_image_request(self, req: Any) -> int:
-            removed_parts = 0
-
-            image_urls = getattr(req, "image_urls", None)
-            if isinstance(image_urls, list) and image_urls:
-                removed_parts += len(image_urls)
-                try:
-                    req.image_urls = []
-                except Exception:
-                    image_urls.clear()
-
-            contexts = getattr(req, "contexts", None)
-            if not isinstance(contexts, list):
-                return removed_parts
-
-            sanitized_contexts: list[Any] = []
-            for context_item in contexts:
-                content = context_item.get("content") if isinstance(context_item, dict) else getattr(context_item, "content", None)
-
-                if isinstance(content, list):
-                    sanitized_content = [part for part in content if not self._is_quoted_image_content_part(part)]
-                    removed_parts += len(content) - len(sanitized_content)
-                    if not sanitized_content:
-                        continue
-                    sanitized_contexts.append(self._replace_request_context_content(context_item, sanitized_content))
-                    continue
-
-                if self._is_quoted_image_content_part(content):
-                    removed_parts += 1
-                    continue
-
-                sanitized_contexts.append(context_item)
-
-            try:
-                req.contexts = sanitized_contexts
-            except Exception:
-                contexts[:] = sanitized_contexts
-            return removed_parts
-
-        def _interpret_luogu_follow_up(self, query: str, session_data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-            if not session_data:
-                return None
-            text = (query or "").strip()
-            if not text:
-                return None
-            lower = text.lower()
-
-            if any(marker in text for marker in ("总共有多少", "一共有多少", "总数", "多少道")):
-                return {"kind": "count"}
-
-            follow_up_index = self._parse_luogu_follow_up_index(text)
-            if follow_up_index:
-                return {"kind": "select", "index": follow_up_index}
-
-            random_markers = (
-                "随便来一道", "随便来一题", "随机来一道", "随机来一题",
-                "随机挑一道", "随机挑一题", "随便挑一道", "随便挑一题",
-                "再来一道", "再来一题",
-            )
-            if (
-                lower == "random"
-                or any(marker in text for marker in random_markers)
-                or ("随机" in text and any(marker in text for marker in ("一道", "一题", "挑", "来")))
-            ):
-                return {"kind": "random"}
-
-            if "截图" in text:
-                return {"kind": "image", "mode": "screenshot"}
-            if any(marker in text for marker in ("看图", "题图", "图片", "图片发出来", "题目图片", "发题图")):
-                return {"kind": "image", "mode": "rendered"}
-
-            if any(marker in text for marker in ("题面", "转发", "合并消息", "完整题面", "markdown")):
-                return {"kind": "forward"}
-
-            if any(marker in text for marker in ("候选", "列表", "重发", "再发", "没看到", "再给我看")):
-                return {"kind": "repeat_candidates"}
-
-            return None
-
-        def _message_requests_problem_statement(self, message: str) -> bool:
-            text = str(message or "").strip()
-            return any(marker in text for marker in ("题面", "转发", "合并消息", "完整题面", "markdown", "原文"))
-
-        def _message_requests_problem_image(self, message: str) -> bool:
-            text = str(message or "").strip()
-            return (
-                "截图" in text
-                or any(
-                    marker in text
-                    for marker in (
-                        "看图",
-                        "题图",
-                        "图片",
-                        "图片发出来",
-                        "题目图片",
-                        "发题图",
-                        "图也来",
-                        "图呢",
-                        "来图",
-                        "上图",
-                        "发图",
-                    )
-                )
-            )
-
-        def _looks_like_luogu_clarification_reply(self, message: str, session_data: Optional[Dict[str, Any]]) -> bool:
-            if not session_data or not session_data.get("pending_clarification"):
-                return False
-            text = str(message or "").strip()
-            if not text or text.startswith("/luogu"):
-                return False
-            if len(text) <= 40:
-                return True
-            markers = (
-                "是的", "不是", "对", "对的", "没错", "确认", "就这个",
-                "难度", "标签", "来源", "蓝题", "紫题", "绿题", "黄题", "橙题", "红题", "黑题",
-            )
-            return any(marker in text for marker in markers)
-
         async def _send_luogu_problem_forward(
             self,
             event: AstrMessageEvent,
@@ -2265,30 +1556,15 @@ if _ASTRBOT:
                 else "10000"
             )
             sender_name = "洛谷助手"
-            nodes = [Node(uin=sender_id, name=sender_name, content=[Plain(header)])]
-
-            if md_content and len(md_content) > 20:
-                chunks = split_markdown_chunks(md_content)
-                for idx, chunk in enumerate(chunks):
-                    label = "📄 题目内容" if idx == 0 else f"📄 题目内容（续{idx}）"
-                    if len(chunks) > 1:
-                        label += f" [{idx + 1}/{len(chunks)}]"
-                    nodes.append(
-                        Node(
-                            uin=sender_id,
-                            name=sender_name,
-                            content=[Plain(f"{label}\n\n{chunk}")],
-                        )
-                    )
-            else:
-                nodes.append(Node(uin=sender_id, name=sender_name, content=[Plain("📄 题目内容为空或获取失败")]))
-
-            nodes.append(
-                Node(
-                    uin=sender_id,
-                    name=sender_name,
-                    content=[Plain("─────────────────────\n💡 普通聊天里可以继续说“看图”“截图”“再来一道”“总共有多少道”")],
-                )
+            footer = "─────────────────────\n💡 普通聊天里可以继续说“看图”“截图”“再来一道”“总共有多少道”"
+            nodes = build_jump_problem_forward_nodes(
+                Node,
+                Plain,
+                sender_id=str(sender_id),
+                sender_name=sender_name,
+                header=header,
+                md_content=md_content,
+                footer=footer,
             )
 
             try:
@@ -2297,10 +1573,8 @@ if _ASTRBOT:
                 await event.send(mr)
             except Exception as exc:
                 logger.warning(f'[Luogu LLM] 合并转发失败，降级为普通消息: {exc}')
-                short_md = md_content[:800] if md_content else "（内容为空）"
-                if len(md_content) > 800:
-                    short_md += "\n\n...（内容过长，可继续说“看图”获取截图）"
-                await event.send(event.plain_result(f"{header}\n\n📄 题目内容：\n\n{short_md}"))
+                for message in build_jump_problem_fallback_messages(header, md_content, footer):
+                    await event.send(event.plain_result(message))
 
             session = self._get_luogu_llm_session(event) or {}
             session["current_pid"] = normalized_pid
@@ -2343,130 +1617,54 @@ if _ASTRBOT:
         async def on_llm_request(self, event, req):
             message = getattr(event, "message_str", "") or ""
             luogu_session = self._get_luogu_llm_session(event)
-            should_force_luogu = (
-                _should_nudge_luogu_problem_tool(message)
-                or self._looks_like_luogu_follow_up(message, luogu_session)
-                or self._looks_like_luogu_clarification_reply(message, luogu_session)
+            request_plan = await plan_luogu_llm_request(
+                context=self.context,
+                event=event,
+                message=message,
+                session_data=luogu_session,
+                session_snapshot=format_luogu_session_snapshot(luogu_session),
+                classify_intent=classify_luogu_routing_intent,
             )
-            scope_hits = _collect_luogu_scope_hits(message)
-            classifier_decision = None
-            if not should_force_luogu and _should_consult_luogu_intent_classifier(message, scope_hits):
-                classifier_decision = await classify_luogu_routing_intent(
-                    self.context,
-                    event,
-                    message,
-                    scope_hits,
-                )
-                if classifier_decision and classifier_decision.get("route_to_luogu"):
-                    should_force_luogu = True
-                    logger.info(
-                        "[Luogu LLM] classifier routed request to luogu_problem_search: confidence=%s reason=%s matched=%s",
-                        classifier_decision.get("confidence"),
-                        classifier_decision.get("reason"),
-                        scope_hits,
-                    )
-            if not should_force_luogu:
+            if not request_plan:
                 return
+            if request_plan.classifier_routed:
+                logger.info(
+                    "[Luogu LLM] classifier routed request to luogu_problem_search: confidence=%s reason=%s matched=%s",
+                    (request_plan.classifier_decision or {}).get("confidence"),
+                    (request_plan.classifier_decision or {}).get("reason"),
+                    request_plan.scope_hits,
+                )
 
             tool_mgr = self.context.get_llm_tool_manager()
-            follow_up = self._interpret_luogu_follow_up(message, luogu_session)
-            direct_pid = extract_problem_id(message)
-            requests_image = self._message_requests_problem_image(message)
-            requests_statement = self._message_requests_problem_statement(message)
-            requests_random = self._message_requests_random_problem(message)
-            quoted_image_context = self._message_has_quoted_image_context(event)
-            workflow_session = self._replay_luogu_session_state(luogu_session)
-            workflow_intent = parse_luogu_workflow_intent(
-                message=message,
-                session_state=workflow_session,
-                follow_up=follow_up,
-                direct_pid=direct_pid,
-                requests_statement=requests_statement,
-                requests_image=requests_image,
-                requests_random=requests_random,
-            )
-            workflow_plan = plan_luogu_workflow(workflow_intent, workflow_session)
+            policy = request_plan.policy
+            follow_up = policy.follow_up
+            direct_pid = policy.direct_pid
+            workflow_plan = policy.workflow_plan
 
-            tool_names: list[str]
-            sequence_hint: str
             if workflow_plan:
-                tool_names = workflow_plan.allowed_tools
-                sequence_hint = workflow_plan.sequence_hint
                 logger.info(
                     "[Luogu Workflow] planned request: intent=%s state=%s commands=%s",
                     workflow_plan.intent.intent.value,
                     workflow_plan.workflow_state.value,
                     [command.name for command in workflow_plan.commands],
                 )
-            else:
-                tool_names = ["luogu_problem_search"]
-                sequence_hint = (
-                    "This is still a candidate-search stage. Only call `luogu_problem_search` first. "
-                    "If the result is only a candidate list, total count, or filter explanation, do not call "
-                    "`luogu_problem_statement` or `luogu_problem_image` until a concrete problem is selected."
-                )
 
-            tools = []
-            for name in tool_names:
-                self.context.activate_llm_tool(name)
-                tool = tool_mgr.get_func(name)
-                if tool is not None:
-                    tools.append(tool)
-            if tools:
-                req.func_tool = ToolSet(tools)
-
-            hint_marker = "[LUOGU_TOOL_POLICY]"
-            session_snapshot = format_luogu_session_snapshot(luogu_session)
-            tool_usage = (
-                "\n工具职责："
-                "\n- `luogu_problem_search(query, limit=10)`：只负责筛题、续筛、追问总数、随机/指定选题，并把结果写回当前 Luogu session。"
-                "\n- `luogu_problem_statement(pid=None)`：只负责按题号发送题面；pid 省略时读取当前 Luogu session 的 `current_pid`。"
-                "\n- `luogu_problem_image(pid=None, mode=\"rendered\")`：只负责按题号发送题图；用户明确要求官网截图时传 `mode=\"screenshot\"`。"
+            removed_parts = enforce_luogu_request(
+                context=self.context,
+                tool_manager=tool_mgr,
+                req=req,
+                request_plan=request_plan,
+                text_part_cls=TextPart,
+                toolset_cls=ToolSet,
             )
-            hint = (
-                f"\n{hint_marker}"
-                "\n当前这条用户消息属于洛谷题库选题/题面展示请求。"
-                f"\n当前 Luogu session 摘要：\n{session_snapshot}"
-                f"{tool_usage}"
-                f"\n当前请求允许使用的工具：{', '.join(tool_names)}。"
-                "\n禁止先调用 `web_search`、`fetch_url`、`astrbot_execute_shell`、`astrbot_execute_python` 这类外部搜索工具。"
-                "\n禁止在第一次工具调用前先输出任何自然语言过渡句，例如“我来帮你找一下”“稍等我查一下”。"
-                f"\n流程要求：{sequence_hint}"
-                "\n如果当前 session 已经有 `current_pid`，就说明用户已经选中过一道题。之后的“题面/看图/截图”请求应该直接使用对应展示工具，而不是重新筛题。"
-            )
-            if quoted_image_context:
-                removed_parts = self._sanitize_quoted_image_request(req)
-                hint += (
-                    "\n如果用户这次是在引用带图片的消息继续追问，请在完成必要工具调用后，用一句简短提醒补充说明："
-                    "当前模型可能无法读取引用里的图片内容；如果结果不对，请去掉图片引用，直接用纯文本重发需求。"
-                )
-            if quoted_image_context:
+            if request_plan.quoted_image_context:
                 logger.info('[Luogu LLM] sanitized quoted-image request parts: removed=%s', removed_parts)
-            current_prompt = getattr(req, "system_prompt", "") or ""
-            if hint_marker not in current_prompt:
-                req.system_prompt = current_prompt + hint
-            req.extra_user_content_parts.append(
-                TextPart(
-                    text=(
-                        "附加指令：这是一条洛谷专用流程请求。"
-                        f"当前允许工具只有：{', '.join(tool_names)}。"
-                        "不要先使用网页搜索、抓取网页、执行 shell 或执行 Python。"
-                        "在第一次工具调用前不要先发任何自然语言说明。"
-                        "如果已经选中过题，就沿用当前 Luogu session，不要丢失上下文。"
-                        + (
-                            "若用户是在引用图片追问，请在完成工具调用后提醒：当前模型可能读不到引用图片内容，必要时请用户去掉引用后重发文本。"
-                            if quoted_image_context
-                            else ""
-                        )
-                    )
-                )
-            )
             logger.info(
                 '[Luogu LLM] enforced luogu toolset for current request: tools=%s follow_up=%s direct_pid=%s quoted_image=%s',
                 req.func_tool.names() if req.func_tool else [],
                 follow_up,
                 direct_pid,
-                quoted_image_context,
+                request_plan.quoted_image_context,
             )
 
         # ── /luogu ────────────────────────────────────────────
@@ -2480,9 +1678,9 @@ if _ASTRBOT:
                 limit (int): 候选列表最多返回多少道题，范围 1-20。
             """
             qq_id = str(event.get_sender_id())
-            cfile = str(_cookies_path(qq_id))
-            if not Path(cfile).exists():
-                return "该用户还没有绑定洛谷账号，请先提醒他使用 /luogu bind 绑定后再调用这个工具。"
+            cfile, cookie_error = resolve_luogu_bound_cookie_file(_cookies_path(qq_id))
+            if cookie_error:
+                return cookie_error
 
             query = (query or '').strip()
             if not query:
@@ -2493,159 +1691,16 @@ if _ASTRBOT:
                 return "缺少选题需求，请给出自然语言描述，例如“来一道提高组图论题”。"
 
             limit = max(1, min(int(limit or 10), 20))
-            session = self._get_luogu_llm_session(event)
-            pending_clarification = (session or {}).get("pending_clarification") or {}
-            if pending_clarification and self._looks_like_luogu_clarification_reply(query, session):
-                original_query = str(pending_clarification.get("original_query") or "").strip()
-                if original_query and query.strip() != original_query:
-                    query = f"{original_query}\n补充说明：{query.strip()}"
-                session.pop("pending_clarification", None)
-                self._set_luogu_llm_session(event, session)
-            direct_pid = extract_problem_id(query)
-            if direct_pid:
-                payload = await run_problem_async(
-                    cfile,
-                    lookup_luogu_problem_by_pid,
-                    pid=direct_pid,
-                )
-                result = format_luogu_problem_tool_result(
-                    query=query,
-                    action='search',
-                    difficulty=None,
-                    tags=[],
-                    keyword=None,
-                    unresolved_tags=[],
-                    payload=payload,
-                )
-                session = remember_luogu_lookup_session(
-                    self._get_luogu_llm_session(event),
-                    query=query,
-                    difficulty=None,
-                    tags=[],
-                    keyword=None,
-                    unresolved_tags=[],
-                    limit=limit,
-                    payload=payload,
-                )
-                self._set_luogu_llm_session(event, session)
-                return result
-
-            intent = await parse_jump_natural_language(self.context, event, query, HOT_TAGS)
-            if not intent:
-                intent = build_default_lookup_intent(query, session)
-
-            parsed_action = intent.get('action') or 'search'
-            parsed_tags, parsed_unresolved_tags = normalize_problem_lookup_tags(intent.get('tags'))
-            parsed_keyword = intent.get('keyword') or None
-            force_new_lookup = should_start_new_luogu_lookup(
-                query,
-                action=parsed_action,
-                difficulty=intent.get('difficulty'),
-                tags=parsed_tags,
-                keyword=parsed_keyword,
-                unresolved_tags=parsed_unresolved_tags,
-            )
-
-            follow_up = derive_luogu_search_follow_up(
+            result, updated_session = await execute_luogu_lookup_turn(
+                context=self.context,
+                event=event,
+                cfile=cfile,
                 query=query,
-                session=session,
-                force_new_lookup=force_new_lookup,
-                parsed_action=parsed_action,
-                parsed_tags=parsed_tags,
-                parsed_unresolved_tags=parsed_unresolved_tags,
-                parsed_keyword=parsed_keyword,
-                difficulty=intent.get("difficulty"),
-                index=intent.get("index"),
-                interpret_follow_up=self._interpret_luogu_follow_up,
-            )
-            if follow_up and session:
-                follow_up_result, updated_session = await execute_luogu_follow_up(
-                    cfile=cfile,
-                    query=query,
-                    limit=limit,
-                    session=session,
-                    follow_up=follow_up,
-                )
-                if updated_session is not None:
-                    self._set_luogu_llm_session(event, updated_session)
-                if follow_up_result:
-                    return follow_up_result
-            if intent.get('need_clarification'):
-                clarification = intent.get('clarification') or '需求还不够明确，请补充题目的难度、标签或关键词。'
-                session = remember_luogu_clarification_session(
-                    self._get_luogu_llm_session(event),
-                    original_query=query,
-                    question=clarification,
-                    partial_intent={
-                        "difficulty": intent.get("difficulty"),
-                        "tags": parsed_tags,
-                        "keyword": parsed_keyword,
-                    },
-                )
-                self._set_luogu_llm_session(event, session)
-                return clarification
-
-            action = intent.get('action') or 'search'
-            tags = parsed_tags
-            unresolved_tags = parsed_unresolved_tags
-            keyword = parsed_keyword
-            merged_lookup = merge_luogu_lookup_context(
-                session,
-                query=query,
-                action=action,
-                difficulty=intent.get('difficulty'),
-                tags=tags,
-                keyword=keyword,
-                unresolved_tags=unresolved_tags,
-            )
-            action = merged_lookup.get('action') or action
-            difficulty = merged_lookup.get('difficulty')
-            tags = merged_lookup.get('tags') or []
-            keyword = merged_lookup.get('keyword') or None
-            unresolved_tags = merged_lookup.get('unresolved_tags') or []
-            preflight_error = preflight_luogu_problem_tool_action(
-                action,
-                index=intent.get('index'),
-                difficulty=difficulty,
-                tags=tags,
-                keyword=keyword,
-            )
-            if preflight_error:
-                return preflight_error
-            if unresolved_tags:
-                unresolved_text = ' '.join(unresolved_tags)
-                keyword = f'{keyword} {unresolved_text}'.strip() if keyword else unresolved_text
-
-            payload = await run_problem_async(
-                cfile,
-                lookup_luogu_problems,
-                difficulty=difficulty,
-                tags=tags,
-                keyword=keyword,
                 limit=limit,
-                action=action,
-                index=intent.get('index'),
+                session_data=self._get_luogu_llm_session(event),
             )
-            session = remember_luogu_lookup_session(
-                self._get_luogu_llm_session(event),
-                query=query,
-                difficulty=difficulty,
-                tags=tags,
-                keyword=keyword,
-                unresolved_tags=unresolved_tags,
-                limit=limit,
-                payload=payload,
-            )
-            self._set_luogu_llm_session(event, session)
-            return format_luogu_problem_tool_result(
-                query=query,
-                action=action,
-                difficulty=difficulty,
-                tags=tags,
-                keyword=keyword,
-                unresolved_tags=unresolved_tags,
-                payload=payload,
-            )
+            self._set_luogu_llm_session(event, updated_session)
+            return result
 
         @filter.llm_tool(name="luogu_problem_statement")
         async def luogu_problem_statement(self, event: AstrMessageEvent, pid: str = "") -> str:
@@ -2656,11 +1711,8 @@ if _ASTRBOT:
             """
 
             qq_id = str(event.get_sender_id())
-            cfile = str(_cookies_path(qq_id))
-            if not Path(cfile).exists():
-                return "该用户还没有绑定洛谷账号，请先提醒他使用 /luogu bind 绑定后再调用这个工具。"
-
-            resolved_pid, error = resolve_luogu_target_pid(
+            cfile, resolved_pid, error = prepare_luogu_problem_display_target(
+                cookie_file=_cookies_path(qq_id),
                 requested_pid=pid,
                 event_message=getattr(event, "message_str", "") or "",
                 session_data=self._get_luogu_llm_session(event),
@@ -2684,11 +1736,8 @@ if _ASTRBOT:
             """
 
             qq_id = str(event.get_sender_id())
-            cfile = str(_cookies_path(qq_id))
-            if not Path(cfile).exists():
-                return "该用户还没有绑定洛谷账号，请先提醒他使用 /luogu bind 绑定后再调用这个工具。"
-
-            resolved_pid, error = resolve_luogu_target_pid(
+            cfile, resolved_pid, error = prepare_luogu_problem_display_target(
+                cookie_file=_cookies_path(qq_id),
                 requested_pid=pid,
                 event_message=getattr(event, "message_str", "") or "",
                 session_data=self._get_luogu_llm_session(event),
@@ -2696,9 +1745,10 @@ if _ASTRBOT:
             if error:
                 return error
 
-            normalized_mode = str(mode or "").strip().lower()
-            if normalized_mode not in ("rendered", "screenshot"):
-                normalized_mode = "screenshot" if "截图" in (getattr(event, "message_str", "") or "") else "rendered"
+            normalized_mode = normalize_luogu_image_mode(
+                mode,
+                getattr(event, "message_str", "") or "",
+            )
             return await self._send_luogu_problem_image(
                 event,
                 cfile,
@@ -2765,8 +1815,8 @@ if _ASTRBOT:
                 return
 
             # 以下指令需要先绑定
-            cfile = str(_cookies_path(qq_id))
-            if not Path(cfile).exists():
+            cfile, cookie_error = resolve_luogu_bound_cookie_file(_cookies_path(qq_id))
+            if cookie_error:
                 yield event.plain_result("请先用 /luogu bind 绑定账号")
                 return
 
@@ -2880,10 +1930,18 @@ if _ASTRBOT:
 
             if sub == 'jump':
                 logger.info(f'[Luogu] 用户 {qq_id} 请求题库跳转')
-                if not Path(cfile).exists():
-                    yield event.plain_result("请先用 /luogu bind 绑定账号")
-                    return
-                async for result in _jump_session_flow(self.context, event, cfile):
+                jump_count = 1
+                if len(args) > 2:
+                    try:
+                        jump_count = clamp_luogu_request_count(int(args[2]))
+                    except Exception:
+                        jump_count = 1
+                async for result in _jump_session_flow(
+                    self.context,
+                    event,
+                    cfile,
+                    requested_count=jump_count,
+                ):
                     yield result
                 return
 

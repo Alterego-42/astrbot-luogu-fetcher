@@ -2,24 +2,34 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Optional, Tuple
 
+from .llm_routing_policy import consume_luogu_pending_clarification, interpret_luogu_follow_up
+from .nl_jump import parse_jump_natural_language
 from .problem_lookup import (
     extract_problem_id,
     format_luogu_problem_tool_result,
+    lookup_luogu_problem_by_pid,
     lookup_luogu_problems,
     lookup_luogu_problems_from_list_url,
+    merge_luogu_lookup_context,
+    normalize_problem_lookup_tags,
+    preflight_luogu_problem_tool_action,
     run_problem_async,
     should_merge_luogu_lookup_context,
     should_start_new_luogu_lookup,
 )
+from .request_count import clamp_luogu_request_count, parse_luogu_requested_count
 from .session_events import (
     EVENT_CANDIDATES_UPDATED,
     EVENT_PROBLEM_SELECTED,
     append_session_event,
 )
-from .tags import DIFFICULTY_NAMES
+from .tags import DIFFICULTY_NAMES, HOT_TAGS
 
 
 def build_default_lookup_intent(query: str, session: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    requested_count = clamp_luogu_request_count(
+        parse_luogu_requested_count(query) or (session or {}).get("requested_count")
+    )
     fallback_keyword = None
     if not (
         session
@@ -40,10 +50,177 @@ def build_default_lookup_intent(query: str, session: Optional[Mapping[str, Any]]
         "tags": [],
         "keyword": fallback_keyword,
         "index": None,
+        "count": requested_count,
         "need_clarification": False,
         "clarification": None,
         "reply": None,
     }
+
+
+async def execute_luogu_lookup_turn(
+    *,
+    context: Any,
+    event: Any,
+    cfile: str,
+    query: str,
+    limit: int,
+    session_data: Optional[Mapping[str, Any]],
+) -> Tuple[str, Dict[str, Any]]:
+    session = dict(session_data or {})
+    query, session, _clarification_consumed = consume_luogu_pending_clarification(query, session)
+
+    direct_pid = extract_problem_id(query)
+    if direct_pid:
+        payload = await run_problem_async(
+            cfile,
+            lookup_luogu_problem_by_pid,
+            pid=direct_pid,
+        )
+        result = format_luogu_problem_tool_result(
+            query=query,
+            action="search",
+            difficulty=None,
+            tags=[],
+            keyword=None,
+            unresolved_tags=[],
+            payload=payload,
+        )
+        updated_session = remember_luogu_lookup_session(
+            session,
+            query=query,
+            difficulty=None,
+            tags=[],
+            keyword=None,
+            unresolved_tags=[],
+            limit=limit,
+            payload=payload,
+            requested_count=1,
+        )
+        return result, updated_session
+
+    intent = await parse_jump_natural_language(context, event, query, HOT_TAGS)
+    if not intent:
+        intent = build_default_lookup_intent(query, session)
+
+    parsed_action = intent.get("action") or "search"
+    requested_count = clamp_luogu_request_count(int(intent.get("count") or 1))
+    parsed_tags, parsed_unresolved_tags = normalize_problem_lookup_tags(intent.get("tags"))
+    parsed_keyword = intent.get("keyword") or None
+    force_new_lookup = should_start_new_luogu_lookup(
+        query,
+        action=parsed_action,
+        difficulty=intent.get("difficulty"),
+        tags=parsed_tags,
+        keyword=parsed_keyword,
+        unresolved_tags=parsed_unresolved_tags,
+    )
+
+    follow_up = derive_luogu_search_follow_up(
+        query=query,
+        session=session,
+        force_new_lookup=force_new_lookup,
+        parsed_action=parsed_action,
+        parsed_tags=parsed_tags,
+        parsed_unresolved_tags=parsed_unresolved_tags,
+        parsed_keyword=parsed_keyword,
+        difficulty=intent.get("difficulty"),
+        index=intent.get("index"),
+        count=requested_count,
+    )
+    if follow_up and session:
+        follow_up_result, updated_session = await execute_luogu_follow_up(
+            cfile=cfile,
+            query=query,
+            limit=limit,
+            session=session,
+            follow_up=follow_up,
+        )
+        if follow_up_result:
+            return follow_up_result, dict(updated_session or session)
+        if updated_session is not None:
+            session = dict(updated_session)
+
+    if intent.get("need_clarification"):
+        clarification = intent.get("clarification") or "需求还不够明确，请补充题目的难度、标签或关键词。"
+        updated_session = remember_luogu_clarification_session(
+            session,
+            original_query=query,
+            question=clarification,
+            partial_intent={
+                "difficulty": intent.get("difficulty"),
+                "tags": parsed_tags,
+                "keyword": parsed_keyword,
+            },
+        )
+        return clarification, updated_session
+
+    action = intent.get("action") or "search"
+    tags = parsed_tags
+    unresolved_tags = parsed_unresolved_tags
+    keyword = parsed_keyword
+    merged_lookup = merge_luogu_lookup_context(
+        session,
+        query=query,
+        action=action,
+        difficulty=intent.get("difficulty"),
+        tags=tags,
+        keyword=keyword,
+        unresolved_tags=unresolved_tags,
+    )
+    action = merged_lookup.get("action") or action
+    difficulty = merged_lookup.get("difficulty")
+    tags = merged_lookup.get("tags") or []
+    keyword = merged_lookup.get("keyword") or None
+    unresolved_tags = merged_lookup.get("unresolved_tags") or []
+
+    preflight_error = preflight_luogu_problem_tool_action(
+        action,
+        index=intent.get("index"),
+        difficulty=difficulty,
+        tags=tags,
+        keyword=keyword,
+    )
+    if preflight_error:
+        return preflight_error, session
+
+    if unresolved_tags:
+        unresolved_text = " ".join(unresolved_tags)
+        keyword = f"{keyword} {unresolved_text}".strip() if keyword else unresolved_text
+
+    payload = await run_problem_async(
+        cfile,
+        lookup_luogu_problems,
+        difficulty=difficulty,
+        tags=tags,
+        keyword=keyword,
+        limit=max(limit, requested_count),
+        action=action,
+        index=intent.get("index"),
+        count=requested_count,
+    )
+    updated_session = remember_luogu_lookup_session(
+        session,
+        query=query,
+        difficulty=difficulty,
+        tags=tags,
+        keyword=keyword,
+        unresolved_tags=unresolved_tags,
+        limit=max(limit, requested_count),
+        payload=payload,
+        requested_count=requested_count,
+    )
+    return (
+        format_luogu_problem_tool_result(
+            query=query,
+            action=action,
+            difficulty=difficulty,
+            tags=tags,
+            keyword=keyword,
+            unresolved_tags=unresolved_tags,
+            payload=payload,
+        ),
+        updated_session,
+    )
 
 
 def derive_luogu_search_follow_up(
@@ -57,12 +234,12 @@ def derive_luogu_search_follow_up(
     parsed_keyword: Optional[str],
     difficulty: Optional[int],
     index: Optional[int],
-    interpret_follow_up,
+    count: int,
 ) -> Optional[Dict[str, Any]]:
     if force_new_lookup or not session:
         return None
 
-    follow_up = interpret_follow_up(query, dict(session))
+    follow_up = interpret_luogu_follow_up(query, dict(session))
     if follow_up:
         return follow_up
 
@@ -73,7 +250,7 @@ def derive_luogu_search_follow_up(
         or difficulty is not None
     )
     if parsed_action == "random" and not has_new_constraints:
-        return {"kind": "random"}
+        return {"kind": "random", "count": clamp_luogu_request_count(count or session.get("requested_count"))}
     if parsed_action == "select" and not has_new_constraints and index:
         return {"kind": "select", "index": index}
     if parsed_action in ("show_image", "show_screenshot") and session.get("current_pid"):
@@ -94,6 +271,7 @@ def remember_luogu_lookup_session(
     unresolved_tags: list[str],
     limit: int,
     payload: Mapping[str, Any],
+    requested_count: int = 1,
 ) -> Dict[str, Any]:
     session = dict(session_data or {})
     session.update(
@@ -109,6 +287,7 @@ def remember_luogu_lookup_session(
             "list_url": payload.get("list_url"),
             "summaries": list(payload.get("summaries") or []),
             "shown_count": len(payload.get("summaries") or []),
+            "requested_count": clamp_luogu_request_count(requested_count),
         }
     )
     append_session_event(
@@ -119,6 +298,7 @@ def remember_luogu_lookup_session(
         difficulty=difficulty,
         tags=list(tags),
         keyword=keyword,
+        requested_count=clamp_luogu_request_count(requested_count),
     )
     chosen = payload.get("chosen") or {}
     if chosen:
@@ -251,6 +431,43 @@ async def execute_luogu_follow_up(
         return f"上一轮洛谷筛选共找到 {total} 道题。上次只展示了前 {shown} 道候选，不是总数。", None
 
     if kind in ("random", "select"):
+        requested_count = clamp_luogu_request_count(int(follow_up.get("count") or session.get("requested_count") or 1))
+        if kind == "select":
+            select_index = int(follow_up.get("index") or 0)
+            summaries = list(session.get("summaries") or [])
+            if 1 <= select_index <= len(summaries):
+                selected_summary = dict(summaries[select_index - 1] or {})
+                selected_pid = str(selected_summary.get("pid") or "").strip()
+                if selected_pid:
+                    payload = await run_problem_async(
+                        cfile,
+                        lookup_luogu_problem_by_pid,
+                        pid=selected_pid,
+                    )
+                    payload["requested_count"] = requested_count
+                    updated_session = remember_luogu_lookup_session(
+                        session,
+                        query=query,
+                        difficulty=session.get("difficulty"),
+                        tags=list(session.get("tags") or []),
+                        keyword=session.get("keyword"),
+                        unresolved_tags=list(session.get("unresolved_tags") or []),
+                        limit=int(session.get("limit") or limit),
+                        payload=payload,
+                        requested_count=requested_count,
+                    )
+                    return (
+                        format_luogu_problem_tool_result(
+                            query=query,
+                            action="select",
+                            difficulty=session.get("difficulty"),
+                            tags=list(session.get("tags") or []),
+                            keyword=session.get("keyword"),
+                            unresolved_tags=list(session.get("unresolved_tags") or []),
+                            payload=payload,
+                        ),
+                        updated_session,
+                    )
         session_list_url = session.get("list_url")
         if session_list_url:
             payload = await run_problem_async(
@@ -262,6 +479,7 @@ async def execute_luogu_follow_up(
                 limit=session.get("limit") or limit,
                 action="random" if kind == "random" else "select",
                 index=follow_up.get("index"),
+                count=requested_count,
             )
         else:
             payload = await run_problem_async(
@@ -273,6 +491,7 @@ async def execute_luogu_follow_up(
                 limit=session.get("limit") or limit,
                 action="random" if kind == "random" else "select",
                 index=follow_up.get("index"),
+                count=requested_count,
             )
         updated_session = remember_luogu_lookup_session(
             session,
@@ -283,6 +502,7 @@ async def execute_luogu_follow_up(
             unresolved_tags=list(session.get("unresolved_tags") or []),
             limit=int(session.get("limit") or limit),
             payload=payload,
+            requested_count=requested_count,
         )
         return (
             format_luogu_problem_tool_result(

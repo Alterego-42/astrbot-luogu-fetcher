@@ -10,7 +10,10 @@ def _normalize_follow_up_tools(
     requests_statement: bool,
     requests_image: bool,
     default_statement: bool,
+    requested_count: int,
 ) -> list[str]:
+    if requested_count > 1:
+        return []
     tools: list[str] = []
     if requests_statement:
         tools.append("luogu_problem_statement")
@@ -30,6 +33,7 @@ def parse_luogu_workflow_intent(
     requests_statement: bool,
     requests_image: bool,
     requests_random: bool,
+    requested_count: int = 1,
 ) -> Optional[LuoguIntent]:
     text = str(message or "").strip()
     current_pid = str((session_state or {}).get("current_pid") or "").strip().upper()
@@ -122,10 +126,12 @@ def parse_luogu_workflow_intent(
             target=LuoguIntentTarget.CURRENT_CANDIDATES,
             constraints={
                 "index": follow_up.get("index"),
+                "count": requested_count,
                 "after_tools": _normalize_follow_up_tools(
                     requests_statement=requests_statement,
                     requests_image=requests_image,
                     default_statement=True,
+                    requested_count=requested_count,
                 ),
             },
             confidence=0.95,
@@ -137,10 +143,12 @@ def parse_luogu_workflow_intent(
             intent=LuoguIntentName.REQUEST_RANDOM,
             target=LuoguIntentTarget.CURRENT_CANDIDATES,
             constraints={
+                "count": requested_count,
                 "after_tools": _normalize_follow_up_tools(
                     requests_statement=requests_statement,
                     requests_image=requests_image,
                     default_statement=True,
+                    requested_count=requested_count,
                 ),
             },
             confidence=0.95,
@@ -152,10 +160,12 @@ def parse_luogu_workflow_intent(
             intent=LuoguIntentName.REQUEST_RANDOM,
             target=LuoguIntentTarget.NONE,
             constraints={
+                "count": requested_count,
                 "after_tools": _normalize_follow_up_tools(
                     requests_statement=False,
                     requests_image=False,
                     default_statement=True,
+                    requested_count=requested_count,
                 ),
                 "source": "fresh_lookup",
             },
@@ -169,7 +179,7 @@ def parse_luogu_workflow_intent(
     return LuoguIntent(
         intent=LuoguIntentName.REQUEST_SEARCH,
         target=LuoguIntentTarget.NONE,
-        constraints={"source": "fresh_lookup"},
+        constraints={"source": "fresh_lookup", "count": requested_count},
         confidence=0.7,
         raw_message=text,
     )

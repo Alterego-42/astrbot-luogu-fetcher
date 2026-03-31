@@ -5,9 +5,12 @@
 继续堆积大量文案与格式化逻辑。
 """
 
-from typing import Dict, List
+import difflib
+import random
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
-from .tags import DIFFICULTY_NAMES
+from .tags import DIFFICULTY_NAMES, fuzzy_match_tag
 
 
 JUMP_HELP_TEXT = """📖 题库跳转帮助
@@ -24,6 +27,17 @@ JUMP_HELP_TEXT = """📖 题库跳转帮助
   back       返回上一步
   back-diff  重新开始筛选
   quit       退出会话"""
+
+JUMP_QUIT_COMMANDS = ('quit', '退出', 'exit', 'q', '算了')
+JUMP_HELP_COMMANDS = ('help', '帮助', '?')
+JUMP_RANDOM_COMMANDS = ('random', 'r', '随机', 'rand')
+JUMP_BACK_TO_KEYWORD_COMMANDS = ('back', 'back-tags', 'back-keyword')
+JUMP_BACK_TO_DIFFICULTY_COMMANDS = ('back-diff',)
+JUMP_SHOW_IMAGE_COMMANDS = ('看图', 'render', 'img', 'image', '图片')
+JUMP_SHOW_SCREENSHOT_COMMANDS = ('截图', 'screenshot')
+JUMP_DONE_COMMANDS = ('done',)
+JUMP_SKIP_COMMANDS = ('skip', '跳过')
+JUMP_STATUS_COMMANDS = ('list', '状态', '当前')
 
 
 def jump_diff_str(state: Dict) -> str:
@@ -108,6 +122,130 @@ def render_selected_tags_update(state: Dict) -> str:
     return f'当前已选标签：{jump_tags_str(state)}'
 
 
+def is_jump_quit_command(lower: str) -> bool:
+    return lower in JUMP_QUIT_COMMANDS
+
+
+def is_jump_help_command(lower: str) -> bool:
+    return lower in JUMP_HELP_COMMANDS
+
+
+def is_jump_random_command(lower: str) -> bool:
+    return lower in JUMP_RANDOM_COMMANDS
+
+
+def is_jump_back_to_keyword_command(lower: str) -> bool:
+    return lower in JUMP_BACK_TO_KEYWORD_COMMANDS
+
+
+def is_jump_back_to_difficulty_command(lower: str) -> bool:
+    return lower in JUMP_BACK_TO_DIFFICULTY_COMMANDS
+
+
+def is_jump_show_image_command(lower: str) -> bool:
+    return lower in JUMP_SHOW_IMAGE_COMMANDS
+
+
+def is_jump_show_screenshot_command(lower: str) -> bool:
+    return lower in JUMP_SHOW_SCREENSHOT_COMMANDS
+
+
+def is_jump_done_command(lower: str) -> bool:
+    return lower in JUMP_DONE_COMMANDS
+
+
+def is_jump_skip_command(lower: str) -> bool:
+    return lower in JUMP_SKIP_COMMANDS
+
+
+def is_jump_status_command(lower: str) -> bool:
+    return lower in JUMP_STATUS_COMMANDS
+
+
+def apply_jump_difficulty_input(state: Dict, text: str) -> Optional[str]:
+    if not text.isdigit():
+        return None
+    difficulty = int(text)
+    if difficulty < 0 or difficulty > 8:
+        return None
+    state['difficulty'] = difficulty if difficulty > 0 else None
+    diff_name = DIFFICULTY_NAMES[difficulty - 1] if difficulty > 0 else '不限'
+    return f'✅ 已选择难度：{diff_name}'
+
+
+def apply_jump_tag_update(state: Dict, text: str) -> Optional[List[str]]:
+    if text.startswith('+'):
+        tag_name = text[1:].strip()
+        if not tag_name:
+            return ['❓ 请输入标签名，如 +动规']
+
+        tag_full, matched = normalize_jump_tag_input(tag_name)
+        if matched:
+            if tag_full in state['tags']:
+                message = f'「{tag_full}」已在已选列表中'
+            else:
+                state['tags'].append(tag_full)
+                message = f'✅ 已添加：「{tag_full}」'
+        else:
+            if tag_name in state['tags']:
+                message = f'「{tag_name}」已在已选列表中'
+            else:
+                state['tags'].append(tag_name)
+                message = (
+                    f'📝 已暂存：「{tag_name}」\n'
+                    '本地词表暂未命中，筛题时会到洛谷站内标签面板继续尝试；'
+                    '若站内也不存在，我会提醒并忽略它。'
+                )
+        return [message, render_selected_tags_update(state)]
+
+    if text.startswith('-'):
+        tag_name = text[1:].strip()
+        resolved_tag = resolve_jump_selected_tag(tag_name, state['tags'])
+        if resolved_tag:
+            state['tags'].remove(resolved_tag)
+            message = f'✅ 已移除：「{resolved_tag}」'
+        else:
+            message = f'「{tag_name}」不在已选列表中'
+        return [message, render_selected_tags_update(state)]
+
+    return None
+
+
+def apply_jump_keyword_input(state: Dict, text: str, lower: str) -> str:
+    if is_jump_skip_command(lower) or lower == '无':
+        state['keyword'] = None
+        return '✅ 跳过关键词筛选'
+    if text:
+        state['keyword'] = text
+        return f'✅ 已设置关键词：「{text}」'
+    state['keyword'] = None
+    return '✅ 未输入关键词，跳过'
+
+
+def apply_jump_search_intent_filters(
+    state: Dict,
+    *,
+    difficulty: Optional[int],
+    tags: List[str],
+    keyword: Optional[str],
+    normalize_tags,
+) -> Optional[str]:
+    state['difficulty'] = difficulty or None
+    normalized_tags, unresolved_tags = normalize_tags(tags)
+    state['tags'] = normalized_tags
+    state['keyword'] = keyword or None
+    if not unresolved_tags:
+        return None
+
+    unresolved_text = ' '.join(unresolved_tags)
+    if state['keyword']:
+        if unresolved_text not in state['keyword']:
+            state['keyword'] = f'{state["keyword"]} {unresolved_text}'.strip()
+    else:
+        state['keyword'] = unresolved_text
+    return 'ℹ️ 洛谷里没有这些精确标签：' + '、'.join(unresolved_tags) + '。这次我先把它们当关键词一起筛。'
+
+
 def render_problem_header(pid: str, detail: Dict) -> str:
     diff_name = detail.get('difficulty_name', '暂无评定')
     diff_emoji = {
@@ -150,3 +288,214 @@ def split_markdown_chunks(md_content: str, max_chunk: int = 1500) -> List[str]:
         md_content[i:i + max_chunk]
         for i in range(0, len(md_content), max_chunk)
     ]
+
+
+def build_jump_problem_forward_nodes(
+    node_factory: Any,
+    plain_factory: Any,
+    *,
+    sender_id: str,
+    sender_name: str,
+    header: str,
+    md_content: str,
+    footer: str,
+) -> List[Any]:
+    nodes = [
+        node_factory(
+            uin=sender_id,
+            name=sender_name,
+            content=[plain_factory(header)],
+        )
+    ]
+
+    if md_content and len(md_content) > 20:
+        chunks = split_markdown_chunks(md_content)
+        for idx, chunk in enumerate(chunks):
+            label = '📄 题目内容' if idx == 0 else f'📄 题目内容（续{idx}）'
+            if len(chunks) > 1:
+                label += f' [{idx+1}/{len(chunks)}]'
+            nodes.append(
+                node_factory(
+                    uin=sender_id,
+                    name=sender_name,
+                    content=[plain_factory(f'{label}\n\n{chunk}')],
+                )
+            )
+    else:
+        nodes.append(
+            node_factory(
+                uin=sender_id,
+                name=sender_name,
+                content=[plain_factory('📄 题目内容为空或获取失败')],
+            )
+        )
+
+    nodes.append(
+        node_factory(
+            uin=sender_id,
+            name=sender_name,
+            content=[plain_factory(footer)],
+        )
+    )
+    return nodes
+
+
+def build_jump_problem_fallback_messages(header: str, md_content: str, footer: str) -> List[str]:
+    short_md = md_content[:800] if md_content else '（内容为空）'
+    if len(md_content or '') > 800:
+        short_md += '\n\n...（内容过长，输入「看图」查看截图）'
+    return [
+        header,
+        f'📄 题目内容：\n\n{short_md}',
+        footer,
+    ]
+
+
+def format_jump_batch_preview(batch_summaries: List[Dict]) -> str:
+    lines = [f'已准备 {len(batch_summaries)} 道题：']
+    for display_index, item in enumerate(batch_summaries, start=1):
+        diff = item.get('difficulty_name') or '未知'
+        lines.append(f'{display_index}. {item.get("pid")} {item.get("title")} | {diff}')
+        lines.append(f'   {item.get("url")}')
+    lines.append('发送 1/2/3 查看对应题面，发送 random 再换一组，发送 back 修改条件。')
+    return '\n'.join(lines)
+
+
+def normalize_jump_tag_input(tag_name: str) -> Tuple[str, bool]:
+    matched = fuzzy_match_tag(tag_name)
+    if matched:
+        return matched[0], True
+    return tag_name.strip(), False
+
+
+def normalize_jump_tag_list_with_meta(tags: Any) -> Tuple[List[str], List[str]]:
+    normalized: List[str] = []
+    unresolved: List[str] = []
+    seen_normalized = set()
+    seen_unresolved = set()
+    for raw in tags or []:
+        tag_name = str(raw).strip()
+        if not tag_name:
+            continue
+        tag_full, matched = normalize_jump_tag_input(tag_name)
+        if matched:
+            if tag_full in seen_normalized:
+                continue
+            normalized.append(tag_full)
+            seen_normalized.add(tag_full)
+            continue
+        if tag_name in seen_unresolved:
+            continue
+        unresolved.append(tag_name)
+        seen_unresolved.add(tag_name)
+    return normalized, unresolved
+
+
+def resolve_jump_selected_tag(tag_name: str, selected_tags: List[str]) -> Optional[str]:
+    raw = tag_name.strip()
+    if not raw:
+        return None
+    if raw in selected_tags:
+        return raw
+
+    matched = fuzzy_match_tag(raw)
+    for candidate in matched:
+        if candidate in selected_tags:
+            return candidate
+
+    lowered = raw.lower()
+    for current in selected_tags:
+        current_lower = current.lower()
+        if lowered == current_lower or lowered in current_lower or current_lower in lowered:
+            return current
+    return None
+
+
+def looks_like_jump_commandish_input(text: str) -> bool:
+    raw = text.strip()
+    if not raw:
+        return False
+    if raw.isdigit() or raw.startswith(('+', '-')):
+        return True
+
+    compact = re.sub(r'[\s_-]+', '', raw.lower())
+    explicit_tokens = {
+        'done', 'skip', 'random', 'rand', 'back', 'backdiff',
+        'backtags', 'backkeyword', 'quit', 'exit', 'help',
+        'render', 'img', 'image', 'screenshot',
+        '看图', '截图', '图片', '帮助', '退出', '随机',
+    }
+    if compact in explicit_tokens:
+        return True
+    if re.fullmatch(r'[a-z0-9]+', compact):
+        return True
+    return bool(
+        difflib.get_close_matches(
+            compact,
+            [token for token in explicit_tokens if re.fullmatch(r'[a-z0-9]+', token)],
+            n=1,
+            cutoff=0.75,
+        )
+    )
+
+
+def suggest_jump_step_command(text: str, commands: Tuple[str, ...]) -> Optional[str]:
+    compact = re.sub(r'[\s_-]+', '', text.strip().lower())
+    if not compact:
+        return None
+    matches = difflib.get_close_matches(
+        compact,
+        [command.replace('-', '') for command in commands],
+        n=1,
+        cutoff=0.75,
+    )
+    if not matches:
+        return None
+    normalized = matches[0]
+    for command in commands:
+        if command.replace('-', '') == normalized:
+            return command
+    return None
+
+
+def resolve_jump_batch_pid(batch_summaries: List[Dict], index: int) -> Tuple[Optional[str], Optional[str]]:
+    if not batch_summaries:
+        return None, None
+    if index < 1 or index > len(batch_summaries):
+        return None, f'⚠️ 序号超出范围，请输入 1-{len(batch_summaries)}'
+    target_pid = str(batch_summaries[index - 1].get('pid') or '').strip()
+    if not target_pid:
+        return None, f'⚠️ 第 {index} 题缺少题号，暂时无法打开。'
+    return target_pid, None
+
+
+def resolve_jump_selection_target(
+    batch_summaries: List[Dict],
+    index: int,
+    total: int,
+) -> Tuple[Optional[str], Optional[int], Optional[str]]:
+    if index < 1:
+        max_display = len(batch_summaries) if batch_summaries else max(0, int(total or 0))
+        return None, None, f'⚠️ 序号超出范围，请输入 1-{max_display}'
+
+    if batch_summaries:
+        target_pid, selection_error = resolve_jump_batch_pid(batch_summaries, index)
+        if target_pid:
+            return target_pid, None, None
+        return None, None, selection_error or '⚠️ 暂时无法打开这道题。'
+
+    total = max(0, int(total or 0))
+    if index <= total:
+        return None, index, None
+    return None, None, f'⚠️ 序号超出范围，请输入 1-{total}'
+
+
+def choose_jump_random_positions(total: int, requested_count: int) -> List[int]:
+    total = max(0, int(total or 0))
+    requested_count = max(1, int(requested_count or 1))
+    if total <= 0:
+        return []
+    if requested_count <= 1:
+        return [random.randint(1, total)]
+    sample_size = min(requested_count, total)
+    return random.sample(range(1, total + 1), sample_size)

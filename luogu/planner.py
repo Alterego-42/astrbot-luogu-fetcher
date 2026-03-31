@@ -160,11 +160,13 @@ def _plan_candidate_read(intent: LuoguIntent, state: LuoguWorkflowState) -> Luog
 def _plan_candidate_transition(intent: LuoguIntent, state: LuoguWorkflowState) -> LuoguWorkflowPlan:
     selection_kind = "select" if intent.intent == LuoguIntentName.REQUEST_SELECT else "random"
     after_tools = _normalize_after_tools(intent, default=["luogu_problem_statement"])
+    requested_count = int(intent.constraints.get("count") or 1)
     tool_names = ["luogu_problem_search", *after_tools]
     payload_by_tool: Dict[str, Dict[str, Any]] = {
         "luogu_problem_search": {
             "action": selection_kind,
             "index": intent.constraints.get("index"),
+            "count": requested_count,
         }
     }
     commands = [
@@ -222,11 +224,13 @@ def _plan_candidate_transition(intent: LuoguIntent, state: LuoguWorkflowState) -
 def _plan_fresh_lookup(intent: LuoguIntent, state: LuoguWorkflowState) -> LuoguWorkflowPlan:
     if intent.intent == LuoguIntentName.REQUEST_RANDOM:
         after_tools = _normalize_after_tools(intent, default=["luogu_problem_statement"])
+        requested_count = int(intent.constraints.get("count") or 1)
         tool_names = ["luogu_problem_search", *after_tools]
         commands = [
             LuoguCommand(
                 name="start_random_lookup",
-                idempotency_key="fresh-random-lookup",
+                payload={"count": requested_count},
+                idempotency_key=f"fresh-random-lookup:{requested_count}",
                 precondition="no direct pid is supplied",
                 postcondition="a random problem is chosen from current request constraints",
             )
@@ -247,10 +251,14 @@ def _plan_fresh_lookup(intent: LuoguIntent, state: LuoguWorkflowState) -> LuoguW
                 "用户明确要求随机选题。先调用 `luogu_problem_search` 完成随机选择。"
                 "只有在搜索结果已经选出具体题目后，后续轮次再调用展示工具。"
             ),
-            steps=_build_tool_steps(tool_names),
+            steps=_build_tool_steps(
+                tool_names,
+                payload_by_tool={"luogu_problem_search": {"count": requested_count}},
+            ),
             commands=commands,
         )
 
+    requested_count = int(intent.constraints.get("count") or 1)
     return LuoguWorkflowPlan(
         intent=intent,
         workflow_state=state,
@@ -260,11 +268,15 @@ def _plan_fresh_lookup(intent: LuoguIntent, state: LuoguWorkflowState) -> LuoguW
             "如果结果只是候选列表、总数或条件说明，不要提前调用题面或题图工具。"
             "只有明确选中了具体题目后，后续轮次再调用 `luogu_problem_statement` 或 `luogu_problem_image`。"
         ),
-        steps=_build_tool_steps(["luogu_problem_search"]),
+        steps=_build_tool_steps(
+            ["luogu_problem_search"],
+            payload_by_tool={"luogu_problem_search": {"count": requested_count}},
+        ),
         commands=[
             LuoguCommand(
                 name="search_candidates",
-                idempotency_key="fresh-search-lookup",
+                payload={"count": requested_count},
+                idempotency_key=f"fresh-search-lookup:{requested_count}",
                 precondition="message describes lookup constraints instead of a direct pid",
                 postcondition="session is updated with fresh candidate results",
             )

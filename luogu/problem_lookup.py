@@ -6,6 +6,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from luogu.problem_fetcher import ProblemFetcher
+from luogu.request_count import clamp_luogu_request_count
 from luogu.tags import DIFFICULTY_NAMES, fuzzy_match_tag
 
 _PROBLEM_ID_PREFIX_RE = re.compile(r"(?<![A-Za-z0-9])[Pp]\s*(\d{4,})(?!\d)")
@@ -438,6 +439,25 @@ def lookup_luogu_problem_by_pid(
     }
 
 
+def _build_problem_entry(
+    pid: str,
+    detail: Dict[str, Any],
+    *,
+    index: int,
+    source_index: Optional[int] = None,
+) -> Dict[str, Any]:
+    title = detail.get('title') or pid
+    return {
+        'index': index,
+        'source_index': source_index or index,
+        'pid': pid,
+        'title': title,
+        'difficulty_name': detail.get('difficulty_name') or '',
+        'tags': detail.get('tags') or [],
+        'url': detail.get('url') or f'https://www.luogu.com.cn/problem/{pid}',
+    }
+
+
 def lookup_luogu_problems(
     fetcher: ProblemFetcher,
     *,
@@ -447,7 +467,9 @@ def lookup_luogu_problems(
     limit: int,
     action: str,
     index: Optional[int],
+    count: int = 1,
 ) -> Dict[str, Any]:
+    count = clamp_luogu_request_count(count)
     user_diff = difficulty
     url_difficulty = (user_diff - 1) if user_diff is not None else None
     result = fetcher.apply_filters(
@@ -461,7 +483,7 @@ def lookup_luogu_problems(
             'message': result.get('message', '筛选失败'),
         }
 
-    summaries = fetcher.extract_problem_summaries(limit=limit)
+    summaries = fetcher.extract_problem_summaries(limit=max(limit, count))
     payload: Dict[str, Any] = {
         'success': True,
         'total': result.get('total', 0),
@@ -470,12 +492,32 @@ def lookup_luogu_problems(
         'applied_tags': result.get('applied_tags') or tags,
         'missing_tags': result.get('missing_tags') or [],
         'summaries': summaries,
+        'requested_count': count,
     }
 
     if payload['total'] <= 0:
         return payload
 
     if action in ('random', 'select'):
+        if action == 'random' and count > 1:
+            sample_size = min(count, payload['total'])
+            chosen_indices = _random.sample(range(1, payload['total'] + 1), sample_size)
+            chosen_list: List[Dict[str, Any]] = []
+            for display_index, chosen_index in enumerate(chosen_indices, start=1):
+                pid = fetcher.navigate_to_problem(
+                    chosen_index,
+                    list_url=result.get('list_url'),
+                    page_size_hint=result.get('page_size'),
+                )
+                if not pid:
+                    continue
+                detail = fetcher.get_problem_detail(pid)
+                chosen_list.append(
+                    _build_problem_entry(pid, detail, index=display_index, source_index=chosen_index)
+                )
+            payload['chosen_list'] = chosen_list
+            payload['summaries'] = list(chosen_list)
+            return payload
         if action == 'random':
             import random as _rand
             chosen_index = _rand.randint(1, payload['total'])
@@ -490,14 +532,7 @@ def lookup_luogu_problems(
         )
         if pid:
             detail = fetcher.get_problem_detail(pid)
-            payload['chosen'] = {
-                'index': chosen_index,
-                'pid': pid,
-                'title': detail.get('title') or pid,
-                'difficulty_name': detail.get('difficulty_name') or '',
-                'tags': detail.get('tags') or [],
-                'url': detail.get('url') or f'https://www.luogu.com.cn/problem/{pid}',
-            }
+            payload['chosen'] = _build_problem_entry(pid, detail, index=chosen_index, source_index=chosen_index)
     return payload
 
 
@@ -510,7 +545,9 @@ def lookup_luogu_problems_from_list_url(
     limit: int,
     action: str,
     index: Optional[int],
+    count: int = 1,
 ) -> Dict[str, Any]:
+    count = clamp_luogu_request_count(count)
     if not list_url:
         return {
             "success": False,
@@ -539,7 +576,7 @@ def lookup_luogu_problems_from_list_url(
         result = fetcher._get_filter_result()
         current_total = int(result.get("total") or stored_total or 0)
 
-    summaries = fetcher.extract_problem_summaries(limit=limit)
+    summaries = fetcher.extract_problem_summaries(limit=max(limit, count))
     payload: Dict[str, Any] = {
         "success": True,
         "total": current_total,
@@ -548,12 +585,32 @@ def lookup_luogu_problems_from_list_url(
         "applied_tags": [],
         "missing_tags": [],
         "summaries": summaries,
+        "requested_count": count,
     }
 
     if current_total <= 0:
         return payload
 
     if action in ("random", "select"):
+        if action == "random" and count > 1:
+            sample_size = min(count, current_total)
+            chosen_indices = _random.sample(range(1, current_total + 1), sample_size)
+            chosen_list: List[Dict[str, Any]] = []
+            for display_index, chosen_index in enumerate(chosen_indices, start=1):
+                pid = fetcher.navigate_to_problem(
+                    chosen_index,
+                    list_url=payload["list_url"],
+                    page_size_hint=result.get("page_size"),
+                )
+                if not pid:
+                    continue
+                detail = fetcher.get_problem_detail(pid)
+                chosen_list.append(
+                    _build_problem_entry(pid, detail, index=display_index, source_index=chosen_index)
+                )
+            payload["chosen_list"] = chosen_list
+            payload["summaries"] = list(chosen_list)
+            return payload
         if action == "random":
             chosen_index = _random.randint(1, current_total)
         else:
@@ -567,14 +624,7 @@ def lookup_luogu_problems_from_list_url(
         )
         if pid:
             detail = fetcher.get_problem_detail(pid)
-            payload["chosen"] = {
-                "index": chosen_index,
-                "pid": pid,
-                "title": detail.get("title") or pid,
-                "difficulty_name": detail.get("difficulty_name") or "",
-                "tags": detail.get("tags") or [],
-                "url": detail.get("url") or f"https://www.luogu.com.cn/problem/{pid}",
-            }
+            payload["chosen"] = _build_problem_entry(pid, detail, index=chosen_index, source_index=chosen_index)
     return payload
 
 
@@ -611,6 +661,22 @@ def format_luogu_problem_tool_result(
         lines.append(f'结果：共找到 {total} 道题。')
 
     chosen = payload.get('chosen')
+    chosen_list = payload.get('chosen_list') or []
+    if chosen_list:
+        lines.append(f'已挑出 {len(chosen_list)} 道题：')
+        for item in chosen_list:
+            chosen_title = str(item.get('title') or '').strip()
+            chosen_pid = str(item.get('pid') or '').strip()
+            if chosen_pid and chosen_title.startswith(chosen_pid + ' '):
+                chosen_title = chosen_title[len(chosen_pid) + 1:].strip()
+            source_index = item.get('source_index')
+            source_note = f'（原候选第 {source_index} 题）' if source_index else ''
+            diff = item.get('difficulty_name') or '未知'
+            lines.append(f'{item.get("index")}. {chosen_pid} {chosen_title or chosen_pid} | {diff}{source_note}')
+            lines.append(f'   {item.get("url")}')
+        lines.append('你可以继续说“第1题题面”“第2题看图”“再来两道”或“总共有多少道”。')
+        return '\n'.join(lines)
+
     if chosen:
         chosen_title = str(chosen.get('title') or '').strip()
         chosen_pid = str(chosen.get('pid') or '').strip()
