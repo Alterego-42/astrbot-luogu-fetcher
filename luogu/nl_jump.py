@@ -11,8 +11,6 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-from .request_count import clamp_luogu_request_count, parse_luogu_requested_count
-
 
 _COLOR_DIFFICULTY_MARKERS = (
     ("黑题", 8),
@@ -91,22 +89,6 @@ def _sanitize_intent(intent: Dict[str, Any], user_text: str = "") -> Dict[str, A
     if index is not None and index <= 0:
         index = None
 
-    count = intent.get('count')
-    if isinstance(count, bool):
-        count = None
-    elif count is not None:
-        try:
-            count = int(count)
-        except Exception:
-            count = None
-    inferred_count = parse_luogu_requested_count(user_text)
-    if inferred_count is not None:
-        count = inferred_count
-    elif count is not None:
-        count = clamp_luogu_request_count(count)
-        if count <= 1:
-            count = None
-
     tags = intent.get('tags') or []
     if not isinstance(tags, list):
         tags = []
@@ -126,7 +108,6 @@ def _sanitize_intent(intent: Dict[str, Any], user_text: str = "") -> Dict[str, A
         'tags': tags,
         'keyword': keyword,
         'index': index,
-        'count': count,
         'need_clarification': need_clarification,
         'clarification': clarification,
         'reply': reply,
@@ -155,7 +136,6 @@ def build_jump_parse_prompt(user_text: str, hot_tags: List[str]) -> str:
 - tags: 标签列表，尽量保留用户原意，最多 8 个
 - keyword: 题目关键词，没有则为 null
 - index: 如果用户明确要“第 N 题”，填正整数，否则 null
-  - count: 如果用户明确要“来两道”“随机来 3 道”这类数量，填写 1-5 的整数；没有明确数量时填 null
 - need_clarification: true/false
 - clarification: 如果信息不足，需要向用户追问的一句话，否则 null
 - reply: 一句简短确认语，可为空
@@ -166,9 +146,8 @@ def build_jump_parse_prompt(user_text: str, hot_tags: List[str]) -> str:
 3. 如果用户要返回上一步，action = back；如果要从头开始，action = restart。
 4. 如果用户只是表达筛题条件，action = search。
 5. 只有当用户明确说“第 3 题”“第3道”这类时，action = select 且填写 index。
-6. 如果用户明确说“来两道”“来 3 题”“随机来三道”，要正确填写 count。
-7. 不要编造标签；可参考这些常见标签：{tags_preview}
-8. 如果请求模糊到无法安全执行，need_clarification = true。
+6. 不要编造标签；可参考这些常见标签：{tags_preview}
+7. 如果请求模糊到无法安全执行，need_clarification = true。
 
 用户输入：
 {user_text}

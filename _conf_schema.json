@@ -1,0 +1,22 @@
+{
+  "Routing_Models": {
+    "description": "Semantic routing settings",
+    "type": "object",
+    "hint": "Configure the provider used by the Luogu semantic expert.",
+    "items": {
+      "semantic_provider_id": {
+        "description": "Semantic expert provider",
+        "type": "string",
+        "hint": "Optional provider for the Luogu semantic expert. Leave empty to reuse the current chat provider.",
+        "default": null,
+        "_special": "select_provider"
+      },
+      "semantic_debug_mode": {
+        "description": "Enable semantic debug logs",
+        "type": "bool",
+        "hint": "Record detailed semantic routing logs for troubleshooting.",
+        "default": true
+      }
+    }
+  }
+}

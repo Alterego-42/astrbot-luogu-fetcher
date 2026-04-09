@@ -144,7 +144,10 @@ def _plan_candidate_read(intent: LuoguIntent, state: LuoguWorkflowState) -> Luog
         workflow_state=state,
         allowed_tools=["luogu_problem_search"],
         sequence_hint=sequence_hint,
-        steps=_build_tool_steps(["luogu_problem_search"]),
+        steps=_build_tool_steps(
+            ["luogu_problem_search"],
+            payload_by_tool={"luogu_problem_search": {"action": mode}},
+        ),
         commands=[
             LuoguCommand(
                 name=command_name,
@@ -160,13 +163,11 @@ def _plan_candidate_read(intent: LuoguIntent, state: LuoguWorkflowState) -> Luog
 def _plan_candidate_transition(intent: LuoguIntent, state: LuoguWorkflowState) -> LuoguWorkflowPlan:
     selection_kind = "select" if intent.intent == LuoguIntentName.REQUEST_SELECT else "random"
     after_tools = _normalize_after_tools(intent, default=["luogu_problem_statement"])
-    requested_count = int(intent.constraints.get("count") or 1)
     tool_names = ["luogu_problem_search", *after_tools]
     payload_by_tool: Dict[str, Dict[str, Any]] = {
         "luogu_problem_search": {
             "action": selection_kind,
             "index": intent.constraints.get("index"),
-            "count": requested_count,
         }
     }
     commands = [
@@ -224,13 +225,11 @@ def _plan_candidate_transition(intent: LuoguIntent, state: LuoguWorkflowState) -
 def _plan_fresh_lookup(intent: LuoguIntent, state: LuoguWorkflowState) -> LuoguWorkflowPlan:
     if intent.intent == LuoguIntentName.REQUEST_RANDOM:
         after_tools = _normalize_after_tools(intent, default=["luogu_problem_statement"])
-        requested_count = int(intent.constraints.get("count") or 1)
         tool_names = ["luogu_problem_search", *after_tools]
         commands = [
             LuoguCommand(
                 name="start_random_lookup",
-                payload={"count": requested_count},
-                idempotency_key=f"fresh-random-lookup:{requested_count}",
+                idempotency_key="fresh-random-lookup",
                 precondition="no direct pid is supplied",
                 postcondition="a random problem is chosen from current request constraints",
             )
@@ -253,12 +252,11 @@ def _plan_fresh_lookup(intent: LuoguIntent, state: LuoguWorkflowState) -> LuoguW
             ),
             steps=_build_tool_steps(
                 tool_names,
-                payload_by_tool={"luogu_problem_search": {"count": requested_count}},
+                payload_by_tool={"luogu_problem_search": {"action": "random"}},
             ),
             commands=commands,
         )
 
-    requested_count = int(intent.constraints.get("count") or 1)
     return LuoguWorkflowPlan(
         intent=intent,
         workflow_state=state,
@@ -270,13 +268,12 @@ def _plan_fresh_lookup(intent: LuoguIntent, state: LuoguWorkflowState) -> LuoguW
         ),
         steps=_build_tool_steps(
             ["luogu_problem_search"],
-            payload_by_tool={"luogu_problem_search": {"count": requested_count}},
+            payload_by_tool={"luogu_problem_search": {"action": "search"}},
         ),
         commands=[
             LuoguCommand(
                 name="search_candidates",
-                payload={"count": requested_count},
-                idempotency_key=f"fresh-search-lookup:{requested_count}",
+                idempotency_key="fresh-search-lookup",
                 precondition="message describes lookup constraints instead of a direct pid",
                 postcondition="session is updated with fresh candidate results",
             )

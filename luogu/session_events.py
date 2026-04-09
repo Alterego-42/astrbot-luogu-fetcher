@@ -33,7 +33,6 @@ def replay_luogu_session_state(
         "difficulty": None,
         "tags": [],
         "keyword": None,
-        "requested_count": 1,
         "last_error": None,
     }
 
@@ -51,8 +50,6 @@ def replay_luogu_session_state(
                 state["tags"] = list(payload.get("tags") or [])
             if payload.get("keyword") is not None:
                 state["keyword"] = payload.get("keyword")
-            if payload.get("requested_count") is not None:
-                state["requested_count"] = int(payload.get("requested_count") or 1)
             state["last_error"] = None
         elif event_type == EVENT_PROBLEM_SELECTED:
             state["current_pid"] = payload.get("pid")
@@ -89,6 +86,4 @@ def replay_luogu_session_state(
         state["tags"] = list(fallback_data.get("tags") or [])
     if not state.get("current_image_mode") and fallback_data.get("current_image_mode"):
         state["current_image_mode"] = fallback_data.get("current_image_mode")
-    if fallback_data.get("requested_count") is not None and int(state.get("requested_count") or 0) <= 1:
-        state["requested_count"] = int(fallback_data.get("requested_count") or 1)
     return state
